@@ -1,0 +1,83 @@
+// lib/sqlite.vit — SQLite3 bindings for Vit
+//
+// Usage: import "lib/sqlite.vit";
+//
+// Basta importar — o compilador compila e linka o shim automaticamente.
+
+link "sqlite_shim.c";
+link "-lsqlite3";
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+let SQLITE_OK:   i32 = 0;
+let SQLITE_ROW:  i32 = 100;
+let SQLITE_DONE: i32 = 101;
+
+// ── Raw extern bindings (from sqlite_shim.c) ──────────────────────────────────
+// Handles (sqlite3*, sqlite3_stmt*) are opaque — represented as str (i8*).
+
+extern fn vit_sqlite_open(filename: str) -> str;
+extern fn vit_sqlite_close(db: str) -> i32;
+extern fn vit_sqlite_exec(db: str, sql: str) -> i32;
+extern fn vit_sqlite_prepare(db: str, sql: str) -> str;
+extern fn vit_sqlite_bind_text(stmt: str, idx: i32, val: str) -> i32;
+extern fn vit_sqlite_step(stmt: str) -> i32;
+extern fn vit_sqlite_column_text(stmt: str, col: i32) -> str;
+extern fn vit_sqlite_column_int(stmt: str, col: i32) -> i32;
+extern fn vit_sqlite_finalize(stmt: str) -> i32;
+extern fn vit_sqlite_errmsg(db: str) -> str;
+
+// ── High-level wrappers ───────────────────────────────────────────────────────
+
+// Opens (or creates) a database file. Returns opaque db handle.
+// Returns null-like handle on error — check sqlite_errmsg(db).
+fn sqlite_open(filename: str) -> str {
+    return vit_sqlite_open(filename);
+}
+
+fn sqlite_close(db: str) -> i32 {
+    return vit_sqlite_close(db);
+}
+
+// Executes a SQL statement with no parameters (DDL, one-shot INSERT/DELETE).
+// Returns SQLITE_OK (0) on success.
+fn sqlite_exec(db: str, sql: str) -> i32 {
+    return vit_sqlite_exec(db, sql);
+}
+
+// Compiles a SQL statement. Use ?1, ?2, ... as bind placeholders.
+// Returns opaque stmt handle.
+fn sqlite_prepare(db: str, sql: str) -> str {
+    return vit_sqlite_prepare(db, sql);
+}
+
+// Binds a text value to placeholder ?idx (1-based).
+fn sqlite_bind(stmt: str, idx: i32, val: str) -> i32 {
+    return vit_sqlite_bind_text(stmt, idx, val);
+}
+
+// Advances the statement by one row.
+// Returns SQLITE_ROW (100) if a row is available, SQLITE_DONE (101) when finished.
+fn sqlite_step(stmt: str) -> i32 {
+    return vit_sqlite_step(stmt);
+}
+
+// Returns the text value of column col (0-based) in the current row.
+fn sqlite_col_text(stmt: str, col: i32) -> str {
+    return vit_sqlite_column_text(stmt, col);
+}
+
+// Returns the integer value of column col (0-based) in the current row.
+fn sqlite_col_int(stmt: str, col: i32) -> i32 {
+    return vit_sqlite_column_int(stmt, col);
+}
+
+// Releases the compiled statement. Always call after stepping.
+fn sqlite_finalize(stmt: str) -> i32 {
+    return vit_sqlite_finalize(stmt);
+}
+
+// Returns the last error message from the database connection.
+fn sqlite_errmsg(db: str) -> str {
+    return vit_sqlite_errmsg(db);
+}

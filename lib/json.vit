@@ -1,0 +1,131 @@
+// lib/json.vit — JSON builder for Vit
+//
+// Usage: import "lib/json.vit";
+// Zero external dependencies — built on StrBuf.
+//
+// Object API:
+//   json_new()               -> StrBuf   empty object builder
+//   json_str(j, key, val)    -> i32      "key": "val"
+//   json_int(j, key, val)    -> i32      "key": 123
+//   json_bool(j, key, val)   -> i32      "key": true/false  (val != 0 → true)
+//   json_null(j, key)        -> i32      "key": null
+//   json_raw(j, key, val)    -> i32      "key": <val as-is>  (nested obj/array)
+//   json_build(j)            -> str      returns {"key":...}
+//
+// Array API:
+//   json_arr_new()           -> StrBuf   empty array builder
+//   json_arr_str(a, val)     -> i32      appends "val"
+//   json_arr_int(a, val)     -> i32      appends 123
+//   json_arr_obj(a, val)     -> i32      appends <val as-is>  (pre-built object)
+//   json_arr_build(a)        -> str      returns [...]
+//
+// Example — building an object:
+//   let j: StrBuf = json_new();
+//   json_bool(j, "created", 1);
+//   json_str(j, "id", id);
+//   return http_json(json_build(j));
+//   // → {"created":true,"id":"joao"}
+//
+// Example — array of objects from SQLite:
+//   let arr: StrBuf = json_arr_new();
+//   let rc: i32 = sqlite_step(stmt);
+//   while rc == SQLITE_ROW {
+//       let obj: StrBuf = json_new();
+//       json_str(obj, "id",    sqlite_col_text(stmt, 0));
+//       json_str(obj, "name",  sqlite_col_text(stmt, 1));
+//       json_str(obj, "email", sqlite_col_text(stmt, 2));
+//       json_arr_obj(arr, json_build(obj));
+//       rc = sqlite_step(stmt);
+//   }
+//   return http_json(json_arr_build(arr));
+
+// ── Object builder ────────────────────────────────────────────────────────────
+
+fn json_new() -> StrBuf {
+    return strbuf_new();
+}
+
+fn json_str(j: StrBuf, key: str, val: str) -> i32 {
+    if strbuf_len(j) > 0 {
+        strbuf_append(j, ",");
+    }
+    strbuf_append(j, format("\"%s\":\"%s\"", key, val));
+    return 0;
+}
+
+fn json_int(j: StrBuf, key: str, val: i32) -> i32 {
+    if strbuf_len(j) > 0 {
+        strbuf_append(j, ",");
+    }
+    strbuf_append(j, format("\"%s\":%d", key, val));
+    return 0;
+}
+
+fn json_bool(j: StrBuf, key: str, val: i32) -> i32 {
+    if strbuf_len(j) > 0 {
+        strbuf_append(j, ",");
+    }
+    if val != 0 {
+        strbuf_append(j, format("\"%s\":true", key));
+    }
+    if val == 0 {
+        strbuf_append(j, format("\"%s\":false", key));
+    }
+    return 0;
+}
+
+fn json_null(j: StrBuf, key: str) -> i32 {
+    if strbuf_len(j) > 0 {
+        strbuf_append(j, ",");
+    }
+    strbuf_append(j, format("\"%s\":null", key));
+    return 0;
+}
+
+// json_raw: insere um valor pré-construído (objeto ou array aninhado)
+fn json_raw(j: StrBuf, key: str, val: str) -> i32 {
+    if strbuf_len(j) > 0 {
+        strbuf_append(j, ",");
+    }
+    strbuf_append(j, format("\"%s\":%s", key, val));
+    return 0;
+}
+
+fn json_build(j: StrBuf) -> str {
+    return format("{%s}", strbuf_to_str(j));
+}
+
+// ── Array builder ─────────────────────────────────────────────────────────────
+
+fn json_arr_new() -> StrBuf {
+    return strbuf_new();
+}
+
+fn json_arr_str(a: StrBuf, val: str) -> i32 {
+    if strbuf_len(a) > 0 {
+        strbuf_append(a, ",");
+    }
+    strbuf_append(a, format("\"%s\"", val));
+    return 0;
+}
+
+fn json_arr_int(a: StrBuf, val: i32) -> i32 {
+    if strbuf_len(a) > 0 {
+        strbuf_append(a, ",");
+    }
+    strbuf_append(a, format("%d", val));
+    return 0;
+}
+
+// json_arr_obj: appenda um objeto/array pré-construído (resultado de json_build)
+fn json_arr_obj(a: StrBuf, val: str) -> i32 {
+    if strbuf_len(a) > 0 {
+        strbuf_append(a, ",");
+    }
+    strbuf_append(a, val);
+    return 0;
+}
+
+fn json_arr_build(a: StrBuf) -> str {
+    return format("[%s]", strbuf_to_str(a));
+}

@@ -1,0 +1,30 @@
+// lib/net.vit — módulo de rede TCP para vit
+// Depende dos builtins __vit_tcp_* gerados pelo compilador.
+
+// Inicia um servidor TCP na porta especificada.
+// Retorna o file descriptor do servidor (pronto para accept).
+fn tcp_listen(port: i32) -> i32 {
+    return __vit_tcp_listen(port);
+}
+
+// Aceita uma conexão entrante. Retorna o fd do cliente.
+fn tcp_accept(server_fd: i32) -> i32 {
+    return __vit_tcp_accept(server_fd);
+}
+
+// Lê dados do cliente para um buffer (str).
+// Retorna número de bytes lidos, ou 0 se conexão fechada.
+fn tcp_read(client_fd: i32, buf: str, size: i32) -> i32 {
+    return __vit_tcp_recv(client_fd, buf, size);
+}
+
+// Envia dados para o cliente.
+// Retorna número de bytes enviados.
+fn tcp_write(client_fd: i32, data: str, len: i32) -> i32 {
+    return __vit_tcp_send(client_fd, data, len);
+}
+
+// Fecha a conexão com o cliente.
+fn tcp_close(client_fd: i32) -> i32 {
+    return __vit_tcp_close(client_fd);
+}
