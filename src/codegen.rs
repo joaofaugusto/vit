@@ -2123,6 +2123,8 @@ impl<'ctx> Codegen<'ctx> {
 
                 let http_build_fn = self.module.get_function("http_build")
                     .ok_or_else(|| "http_handle(): http_build not found — did you import lib/http.vit?".to_string())?;
+                let http_response_free_fn = self.module.get_function("http_response_free")
+                    .ok_or_else(|| "http_handle(): http_response_free not found — did you import lib/http.vit?".to_string())?;
                 let wrapper = self.module.add_function(
                     &wrapper_name,
                     i8_ptr.fn_type(&[i8_ptr.into()], false),
@@ -2144,6 +2146,7 @@ impl<'ctx> Codegen<'ctx> {
                     .try_as_basic_value()
                     .left()
                     .ok_or_else(|| "http_handle(): http_build returned no value".to_string())?;
+                self.builder.build_call(http_response_free_fn, &[resp.into()], "free_resp").unwrap();
                 self.builder.build_return(Some(&built)).unwrap();
                 if let Some(bb) = saved_bb {
                     self.builder.position_at_end(bb);
@@ -3194,6 +3197,32 @@ impl<'ctx> Codegen<'ctx> {
             return Ok(raw);
         }
 
+        // map_free(m)
+        // Frees the backing allocation of a local/global map variable.
+        if name == "map_free" {
+            if arguments.len() != 1 {
+                return Err("map_free() takes 1 argument".to_string());
+            }
+
+            let map_ptr = self.generate_expression(&arguments[0])?.into_pointer_value();
+            let free_fn = self.module.get_function("free").unwrap();
+            self.builder.build_call(free_fn, &[map_ptr.into()], "map_free").unwrap();
+            return Ok(self.context.i32_type().const_int(0, false).into());
+        }
+
+        // free(ptr)
+        // Frees a heap-allocated string/buffer previously returned by Vit helpers or C shims.
+        if name == "free" {
+            if arguments.len() != 1 {
+                return Err("free() takes 1 argument".to_string());
+            }
+
+            let ptr = self.generate_expression(&arguments[0])?.into_pointer_value();
+            let free_fn = self.module.get_function("free").unwrap();
+            self.builder.build_call(free_fn, &[ptr.into()], "free_call").unwrap();
+            return Ok(self.context.i32_type().const_int(0, false).into());
+        }
+
         // malloc(size: i32) -> str
         // Calls C malloc, auto-extends i32 to i64.
         if name == "malloc" {
@@ -3409,12 +3438,15 @@ impl<'ctx> Codegen<'ctx> {
             let tcp_accept_fn = self.module.get_function("__vit_tcp_accept").unwrap();
             let tcp_close_fn  = self.module.get_function("__vit_tcp_close").unwrap();
             let strcmp_fn     = self.module.get_function("strcmp").unwrap();
+            let free_fn       = self.module.get_function("free").unwrap();
             let http_read_fn = self.module.get_function("http_read")
                 .ok_or_else(|| "http_listen(): http_read not found - did you import lib/http.vit?".to_string())?;
             let http_send_fn = self.module.get_function("http_send")
                 .ok_or_else(|| "http_listen(): http_send not found - did you import lib/http.vit?".to_string())?;
             let http_not_found_fn = self.module.get_function("http_not_found")
                 .ok_or_else(|| "http_listen(): http_not_found not found - did you import lib/http.vit?".to_string())?;
+            let http_request_free_fn = self.module.get_function("http_request_free")
+                .ok_or_else(|| "http_listen(): http_request_free not found - did you import lib/http.vit?".to_string())?;
             let http_route_matches_fn = self.module.get_function("http_route_matches")
                 .ok_or_else(|| "http_listen(): http_route_matches not found - did you import lib/http.vit?".to_string())?;
             let http_route_apply_fn = self.module.get_function("http_route_apply")
@@ -3465,6 +3497,7 @@ impl<'ctx> Codegen<'ctx> {
             let req_val = self.builder
                 .build_call(http_parse_fn, &[buf.into()], "req_val")
                 .unwrap().try_as_basic_value().left().unwrap();
+            self.builder.build_call(free_fn, &[buf.into()], "free_http_buf").unwrap();
             let req_slot = self.builder.build_alloca(req_st_type, "req_slot").unwrap();
             self.builder.build_store(req_slot, req_val.into_struct_value()).unwrap();
 
@@ -3545,6 +3578,7 @@ impl<'ctx> Codegen<'ctx> {
             let final_resp2 = self.builder.build_load(i8_ptr, resp_slot, "final_resp2").unwrap().into_pointer_value();
             let cli  = self.builder.build_load(i32_type, cli_slot, "cli2").unwrap().into_int_value();
             self.builder.build_call(http_send_fn, &[cli.into(), final_resp2.into()], "nsent").unwrap();
+            self.builder.build_call(http_request_free_fn, &[req_slot.into()], "free_req").unwrap();
             self.builder.build_call(tcp_close_fn, &[cli.into()], "closed").unwrap();
             self.builder.build_unconditional_branch(accept_bb).unwrap();
 

@@ -211,6 +211,21 @@ fn http_param(req: Request, key: str) -> str {
     return "";
 }
 
+fn http_request_free(req: Request) -> i32 {
+    if len(req.method) > 0 {
+        free(req.method);
+    }
+    if len(req.path) > 0 {
+        free(req.path);
+    }
+    if len(req.body) > 0 {
+        free(req.body);
+    }
+    map_free(req.headers);
+    map_free(req.params);
+    return 0;
+}
+
 fn http_route_matches(req: Request, route: str) -> i32 {
     let clean: str = http_path_clean(req);
 
@@ -323,6 +338,11 @@ fn http_response(status: i32, content_type: str, body: str) -> Response {
 fn http_with_header(resp: Response, name: str, value: str) -> Response {
     strbuf_append(resp.headers, format("%s: %s\r\n", name, value));
     return resp;
+}
+
+fn http_response_free(resp: Response) -> i32 {
+    strbuf_free(resp.headers);
+    return 0;
 }
 
 fn http_text_response(status: i32, body: str) -> Response {

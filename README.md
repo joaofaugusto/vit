@@ -887,6 +887,7 @@ struct Response {
 | `http_method(req)` | Método HTTP |
 | `http_path(req)` | Path completo |
 | `http_body(req)` | Body da request |
+| `http_request_free(req)` | Libera strings e mapas associados ao `Request` |
 
 #### Form e query string
 
@@ -908,6 +909,7 @@ struct Response {
 | `http_build(resp)` | Serializa com `Content-Length` automático |
 | `http_text_response(status, body)` | Builder `text/plain` |
 | `http_json_response(status, body)` | Builder `application/json` |
+| `http_response_free(resp)` | Libera o `StrBuf` interno de headers |
 | `http_ok(body)` | 200 text/plain |
 | `http_json(body)` | 200 application/json |
 | `http_created(body)` | 201 text/plain |
@@ -926,6 +928,8 @@ struct Response {
 |--------|-----------|
 | `http_handle(method, path, fn)` | Registra handler |
 | `http_listen(port)` | Inicia loop de atendimento com read/send completos |
+
+`http_listen()` agora faz cleanup automÃ¡tico do buffer bruto da request, do `Request` parseado e do `Response.headers` quando o handler retorna `Response`. Isso reduz bastante a pressÃ£o de memÃ³ria em servidores de longa duraÃ§Ã£o sem exigir `defer`.
 
 ```vit
 import "lib/http.vit";
