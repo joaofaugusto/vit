@@ -5,18 +5,21 @@
 #   bash install.sh
 #
 # O que faz:
-#   1. Compila e instala o binário `vit` via cargo
-#   2. Copia a stdlib para ~/.vit/lib/
+#   1. Instala dependências do sistema (clang, llvm, libcurl, libsqlite3)
+#   2. Compila e instala o binário `vit` via cargo
+#   3. Copia a stdlib para ~/.vit/lib/
 
 set -euo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
+YELLOW='\033[0;33m'
 RESET='\033[0m'
 
 info()    { echo -e "${CYAN}[vit]${RESET} $*"; }
 success() { echo -e "${GREEN}[vit]${RESET} $*"; }
+warn()    { echo -e "${YELLOW}[vit]${RESET} $*"; }
 error()   { echo -e "${RED}[vit]${RESET} $*" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +34,51 @@ check_dep() {
 check_dep cargo  "cargo (via rustup: https://rustup.rs)"
 check_dep clang  "clang"
 check_dep llc    "llvm (ex: llvm-18)"
+
+# ── 1b. Dependências das libs (apt) ───────────────────────────────────────────
+#
+# lib/sqlite.vit   → libsqlite3-dev
+# lib/http_client.vit → libcurl4-openssl-dev
+#
+# Instaladas automaticamente se apt estiver disponível.
+# Em outros sistemas (brew, yum, pacman) exibe instruções manuais.
+
+APT_PKGS=()
+
+pkg_installed() {
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+}
+
+if command -v apt-get &>/dev/null; then
+    pkg_installed libsqlite3-dev   || APT_PKGS+=(libsqlite3-dev)
+    pkg_installed libcurl4-openssl-dev || APT_PKGS+=(libcurl4-openssl-dev)
+
+    if [ ${#APT_PKGS[@]} -gt 0 ]; then
+        info "Instalando dependências do sistema: ${APT_PKGS[*]}"
+        sudo apt-get install -y "${APT_PKGS[@]}" \
+            || error "Falha ao instalar dependências. Tente manualmente: sudo apt install ${APT_PKGS[*]}"
+        success "Dependências instaladas."
+    else
+        success "Dependências do sistema já instaladas."
+    fi
+else
+    # Verifica se as libs estão disponíveis de outra forma
+    MISSING_LIBS=()
+    pkg_check_header() {
+        [ -f "$1" ] || MISSING_LIBS+=("$2")
+    }
+    pkg_check_header /usr/include/sqlite3.h     "libsqlite3-dev"
+    pkg_check_header /usr/include/curl/curl.h   "libcurl4-openssl-dev"
+
+    if [ ${#MISSING_LIBS[@]} -gt 0 ]; then
+        warn "apt-get não encontrado. Instale manualmente as dependências:"
+        warn "  sqlite3:  brew install sqlite  |  yum install sqlite-devel  |  pacman -S sqlite"
+        warn "  libcurl:  brew install curl    |  yum install libcurl-devel |  pacman -S curl"
+        warn "Continuando sem garantia de que lib/sqlite.vit e lib/http_client.vit funcionarão."
+    else
+        success "Dependências do sistema encontradas."
+    fi
+fi
 
 # ── 2. Compilar e instalar o binário ──────────────────────────────────────────
 
