@@ -26,6 +26,8 @@ pub struct Codegen<'ctx> {
     array_params: HashMap<String, BasicTypeEnum<'ctx>>,
     // LLVM struct types keyed by struct name
     struct_defs: HashMap<String, (StructType<'ctx>, Vec<String>)>, // name → (llvm_type, field_names)
+    // Original AST field types keyed by struct name
+    struct_field_types: HashMap<String, Vec<Type>>,
     // Tracks which local variables are structs (maps var_name → struct_name)
     var_struct_names: HashMap<String, String>,
 }
@@ -49,6 +51,7 @@ impl<'ctx> Codegen<'ctx> {
             global_map_variables: HashMap::new(),
             array_params: HashMap::new(),
             struct_defs: HashMap::new(),
+            struct_field_types: HashMap::new(),
             var_struct_names: HashMap::new(),
         }
     }
@@ -2279,6 +2282,10 @@ impl<'ctx> Codegen<'ctx> {
             let opaque = self.context.opaque_struct_type(&s.name);
             let field_names: Vec<String> = s.fields.iter().map(|f| f.name.clone()).collect();
             self.struct_defs.insert(s.name.clone(), (opaque, field_names));
+            self.struct_field_types.insert(
+                s.name.clone(),
+                s.fields.iter().map(|f| f.typ.clone()).collect(),
+            );
         }
         // Pass 2: fill in each struct body — convert_type can now resolve nested struct types.
         for s in structs {
@@ -3365,15 +3372,33 @@ impl<'ctx> Codegen<'ctx> {
             if arguments.len() != expected {
                 return Err(format!("{}() takes {} arguments", name, expected));
             }
-            let map_name = match &arguments[0] {
-                Expression::Identifier(n) => n.clone(),
+            let (key_type, val_type, map_ptr) = match &arguments[0] {
+                Expression::Identifier(map_name) => {
+                    let (key_type, val_type) = self.map_variables.get(map_name).cloned()
+                        .ok_or_else(|| format!("'{}' is not a map variable", map_name))?;
+                    let (alloca, atyp) = self.variables.get(map_name).copied()
+                        .ok_or_else(|| format!("Undefined variable: {}", map_name))?;
+                    let map_ptr = self.builder.build_load(atyp, alloca, map_name).unwrap().into_pointer_value();
+                    (key_type, val_type, map_ptr)
+                }
+                Expression::FieldAccess { object, field } => {
+                    let (struct_ptr, struct_name) = self.resolve_struct_ptr(object)?;
+                    let (_, field_names) = self.struct_defs.get(&struct_name)
+                        .ok_or_else(|| format!("Unknown struct '{}'", struct_name))?
+                        .clone();
+                    let field_types = self.struct_field_types.get(&struct_name)
+                        .ok_or_else(|| format!("Missing field type info for struct '{}'", struct_name))?;
+                    let idx = field_names.iter().position(|n| n == field)
+                        .ok_or_else(|| format!("Struct '{}' has no field '{}'", struct_name, field))?;
+                    let (key_type, val_type) = match &field_types[idx] {
+                        Type::Map { key, value } => ((*key.clone()), (*value.clone())),
+                        _ => return Err(format!("First arg of {}() must be a map variable", name)),
+                    };
+                    let map_ptr = self.generate_expression(&arguments[0])?.into_pointer_value();
+                    (key_type, val_type, map_ptr)
+                }
                 _ => return Err(format!("First arg of {}() must be a map variable", name)),
             };
-            let (key_type, val_type) = self.map_variables.get(&map_name).cloned()
-                .ok_or_else(|| format!("'{}' is not a map variable", map_name))?;
-            let (alloca, atyp) = self.variables.get(&map_name).copied()
-                .ok_or_else(|| format!("Undefined variable: {}", map_name))?;
-            let map_ptr = self.builder.build_load(atyp, alloca, &map_name).unwrap().into_pointer_value();
 
             let helper_name = match (name, &key_type, &val_type) {
                 ("map_set", Type::I32, Type::I32) => "__vit_map_i32i32_set",
