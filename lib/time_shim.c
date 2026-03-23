@@ -1,6 +1,14 @@
 // time_shim.c — time functions for Vit
 // Self-contained: uses only POSIX libc (time.h, unistd.h).
 
+// Required so glibc exposes strptime/timegm prototypes.
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>

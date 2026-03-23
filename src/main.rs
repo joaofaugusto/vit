@@ -916,6 +916,11 @@ fn compile_c_sources(flags: Vec<String>, tmp_prefix: &str) -> Vec<String> {
             }
         }
 
+        if flag.ends_with("time_shim.c") {
+            cmd.arg("-D_XOPEN_SOURCE=700");
+            cmd.arg("-D_GNU_SOURCE");
+        }
+
         let status = cmd.status().unwrap_or_else(|e| {
             eprintln!("error: failed to run clang for '{}': {}", flag, e);
             process::exit(1);
