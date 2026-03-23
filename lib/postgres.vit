@@ -1,0 +1,148 @@
+// lib/postgres.vit — PostgreSQL client for Vit (powered by libpq)
+//
+// Usage: import "lib/postgres.vit";
+//
+// Requires: sudo apt install libpq-dev
+//
+// Key difference from sqlite.vit:
+//   libpq returns ALL rows at once in a result handle (no step loop).
+//   Iterate from 0 to postgres_nrows(res)-1 using postgres_col().
+//   Always call postgres_free(res) when done with a result.
+//
+// Parameterized queries:
+//   Use $1, $2, ... placeholders. Call postgres_param() for each value
+//   in order, then postgres_query_p() or postgres_exec_p().
+
+link "postgres_shim.c";
+link "-lpq";
+
+// ── raw extern bindings ───────────────────────────────────────────────────────
+
+extern fn vit_postgres_connect(conninfo: str) -> str;
+extern fn vit_postgres_ok(conn: str) -> i32;
+extern fn vit_postgres_close(conn: str) -> i32;
+extern fn vit_postgres_errmsg(conn: str) -> str;
+
+extern fn vit_postgres_exec(conn: str, sql: str) -> i32;
+extern fn vit_postgres_query(conn: str, sql: str) -> str;
+extern fn vit_postgres_result_ok(res: str) -> i32;
+extern fn vit_postgres_result_errmsg(res: str) -> str;
+extern fn vit_postgres_nrows(res: str) -> i32;
+extern fn vit_postgres_ncols(res: str) -> i32;
+extern fn vit_postgres_col(res: str, row: i32, col: i32) -> str;
+extern fn vit_postgres_col_int(res: str, row: i32, col: i32) -> i32;
+extern fn vit_postgres_is_null(res: str, row: i32, col: i32) -> i32;
+extern fn vit_postgres_col_name(res: str, col: i32) -> str;
+extern fn vit_postgres_free(res: str) -> i32;
+
+extern fn vit_postgres_param(val: str) -> i32;
+extern fn vit_postgres_query_p(conn: str, sql: str, n: i32) -> str;
+extern fn vit_postgres_exec_p(conn: str, sql: str, n: i32) -> i32;
+
+// ── connection ────────────────────────────────────────────────────────────────
+
+// Connects to PostgreSQL.
+// conninfo: "postgresql://user:pass@host:5432/dbname"
+//        or "host=localhost dbname=mydb user=foo password=bar"
+// Check postgres_ok(db) after connecting.
+fn postgres_connect(conninfo: str) -> str {
+    return vit_postgres_connect(conninfo);
+}
+
+// Returns 1 if the connection is open and healthy, 0 otherwise.
+fn postgres_ok(conn: str) -> i32 {
+    return vit_postgres_ok(conn);
+}
+
+// Closes the connection and frees memory.
+fn postgres_close(conn: str) -> i32 {
+    return vit_postgres_close(conn);
+}
+
+// Returns the last error message from the connection.
+fn postgres_errmsg(conn: str) -> str {
+    return vit_postgres_errmsg(conn);
+}
+
+// ── exec (no rows) ────────────────────────────────────────────────────────────
+
+// Executes a SQL statement that returns no rows (CREATE, INSERT, UPDATE, DELETE).
+// Returns 1 on success, 0 on error.
+fn postgres_exec(conn: str, sql: str) -> i32 {
+    return vit_postgres_exec(conn, sql);
+}
+
+// ── query (returns rows) ──────────────────────────────────────────────────────
+
+// Executes a SELECT and returns an opaque result handle.
+// Always call postgres_free(res) when done.
+fn postgres_query(conn: str, sql: str) -> str {
+    return vit_postgres_query(conn, sql);
+}
+
+// Returns 1 if the result is valid (query succeeded), 0 on error.
+fn postgres_result_ok(res: str) -> i32 {
+    return vit_postgres_result_ok(res);
+}
+
+// Returns the error message from a failed result.
+fn postgres_result_errmsg(res: str) -> str {
+    return vit_postgres_result_errmsg(res);
+}
+
+// Returns the number of rows in the result.
+fn postgres_nrows(res: str) -> i32 {
+    return vit_postgres_nrows(res);
+}
+
+// Returns the number of columns in the result.
+fn postgres_ncols(res: str) -> i32 {
+    return vit_postgres_ncols(res);
+}
+
+// Returns the string value at (row, col). Both are 0-based.
+// Returns "" for NULL values — use postgres_is_null() to distinguish.
+fn postgres_col(res: str, row: i32, col: i32) -> str {
+    return vit_postgres_col(res, row, col);
+}
+
+// Returns the integer value at (row, col).
+fn postgres_col_int(res: str, row: i32, col: i32) -> i32 {
+    return vit_postgres_col_int(res, row, col);
+}
+
+// Returns 1 if the value at (row, col) is NULL.
+fn postgres_is_null(res: str, row: i32, col: i32) -> i32 {
+    return vit_postgres_is_null(res, row, col);
+}
+
+// Returns the column name at index col (0-based).
+fn postgres_col_name(res: str, col: i32) -> str {
+    return vit_postgres_col_name(res, col);
+}
+
+// Frees a result handle. Always call after processing rows.
+fn postgres_free(res: str) -> i32 {
+    return vit_postgres_free(res);
+}
+
+// ── parameterized queries ─────────────────────────────────────────────────────
+
+// Adds a parameter value for the next parameterized query.
+// Values are bound in order: first call → $1, second → $2, etc.
+fn postgres_param(val: str) -> i32 {
+    return vit_postgres_param(val);
+}
+
+// Executes a parameterized SELECT. n = number of postgres_param() calls made.
+// Returns a result handle — call postgres_free() when done.
+fn postgres_query_p(conn: str, sql: str, n: i32) -> str {
+    return vit_postgres_query_p(conn, sql, n);
+}
+
+// Executes a parameterized statement with no rows expected (INSERT/UPDATE/DELETE).
+// n = number of postgres_param() calls made.
+// Returns 1 on success, 0 on error.
+fn postgres_exec_p(conn: str, sql: str, n: i32) -> i32 {
+    return vit_postgres_exec_p(conn, sql, n);
+}

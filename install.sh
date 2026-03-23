@@ -50,8 +50,9 @@ pkg_installed() {
 }
 
 if command -v apt-get &>/dev/null; then
-    pkg_installed libsqlite3-dev   || APT_PKGS+=(libsqlite3-dev)
+    pkg_installed libsqlite3-dev       || APT_PKGS+=(libsqlite3-dev)
     pkg_installed libcurl4-openssl-dev || APT_PKGS+=(libcurl4-openssl-dev)
+    pkg_installed libpq-dev            || APT_PKGS+=(libpq-dev)
 
     if [ ${#APT_PKGS[@]} -gt 0 ]; then
         info "Instalando dependências do sistema: ${APT_PKGS[*]}"
@@ -69,6 +70,7 @@ else
     }
     pkg_check_header /usr/include/sqlite3.h     "libsqlite3-dev"
     pkg_check_header /usr/include/curl/curl.h   "libcurl4-openssl-dev"
+    pkg_check_header /usr/include/postgresql    "libpq-dev"
 
     if [ ${#MISSING_LIBS[@]} -gt 0 ]; then
         warn "apt-get não encontrado. Instale manualmente as dependências:"
