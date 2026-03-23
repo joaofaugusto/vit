@@ -1,0 +1,65 @@
+// lib/time.vit — time functions for Vit
+//
+// Usage: import "lib/time.vit";
+//
+// Zero external dependencies — bundled in time_shim.c (POSIX libc only).
+//
+// All timestamps are Unix time (seconds since 1970-01-01T00:00:00Z).
+// time_format() and time_parse() work in UTC.
+// Use time_format_local() for local timezone display.
+
+link "time_shim.c";
+
+// ── raw extern bindings ───────────────────────────────────────────────────────
+
+extern fn vit_time_now() -> i64;
+extern fn vit_time_now_ms() -> i64;
+extern fn vit_time_format(ts: i64, fmt: str) -> str;
+extern fn vit_time_format_local(ts: i64, fmt: str) -> str;
+extern fn vit_time_parse(s: str) -> i64;
+extern fn vit_time_sleep(ms: i32) -> i32;
+extern fn vit_time_free(s: str) -> i32;
+
+// ── high-level wrappers ───────────────────────────────────────────────────────
+
+// Returns the current Unix timestamp in seconds.
+fn time_now() -> i64 {
+    return vit_time_now();
+}
+
+// Returns the current Unix timestamp in milliseconds.
+fn time_now_ms() -> i64 {
+    return vit_time_now_ms();
+}
+
+// Formats a Unix timestamp using strftime patterns (UTC).
+// Common patterns:
+//   "%Y-%m-%d"            → "2025-03-23"
+//   "%Y-%m-%dT%H:%M:%SZ"  → "2025-03-23T14:05:00Z"
+//   "%H:%M:%S"            → "14:05:00"
+// Returns a heap-allocated string — call time_free() when done.
+fn time_format(ts: i64, fmt: str) -> str {
+    return vit_time_format(ts, fmt);
+}
+
+// Same as time_format but in the local timezone.
+fn time_format_local(ts: i64, fmt: str) -> str {
+    return vit_time_format_local(ts, fmt);
+}
+
+// Parses an ISO-8601 string to a Unix timestamp in seconds.
+// Accepts: "YYYY-MM-DD", "YYYY-MM-DDTHH:MM:SSZ", "YYYY-MM-DDTHH:MM:SS"
+// Returns -1 on parse failure.
+fn time_parse(s: str) -> i64 {
+    return vit_time_parse(s);
+}
+
+// Sleeps for ms milliseconds. Useful for polling loops.
+fn time_sleep(ms: i32) -> i32 {
+    return vit_time_sleep(ms);
+}
+
+// Frees a string returned by time_format() or time_format_local().
+fn time_free(s: str) -> i32 {
+    return vit_time_free(s);
+}

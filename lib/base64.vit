@@ -1,0 +1,27 @@
+// lib/base64.vit — Base64 encode/decode for Vit
+//
+// Usage: import "lib/base64.vit";
+//
+// Zero external dependencies — bundled in base64_shim.c.
+// Returned strings are heap-allocated; call base64_free() when done.
+
+link "base64_shim.c";
+
+extern fn vit_base64_encode(data: str) -> str;
+extern fn vit_base64_decode(data: str) -> str;
+extern fn vit_base64_free(s: str) -> i32;
+
+// Encodes data to Base64 (standard alphabet, with = padding).
+fn base64_encode(data: str) -> str {
+    return vit_base64_encode(data);
+}
+
+// Decodes a Base64 string. Returns "" on invalid input.
+fn base64_decode(data: str) -> str {
+    return vit_base64_decode(data);
+}
+
+// Frees a string returned by base64_encode() or base64_decode().
+fn base64_free(s: str) -> i32 {
+    return vit_base64_free(s);
+}

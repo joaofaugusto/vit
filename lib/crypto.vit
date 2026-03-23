@@ -9,6 +9,7 @@
 // In practice, for short-lived web handlers this is fine to skip.
 
 link "crypto_shim.c";
+link "base64_shim.c";
 
 // ── raw extern bindings ───────────────────────────────────────────────────────
 
