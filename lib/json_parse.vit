@@ -1,0 +1,139 @@
+// lib/json_parse.vit — JSON parsing for Vit (powered by cJSON)
+//
+// Usage: import "lib/json_parse.vit";
+//
+// cJSON is downloaded into ~/.vit/lib/ by install.sh (zero extra apt deps).
+// The compiler auto-compiles cJSON.c and json_parse_shim.c before linking.
+//
+// Memory model:
+//   json_parse()     → allocates; you own it, call json_free() when done.
+//   json_get_obj()   → returns pointer into parent; do NOT call json_free().
+//   json_arr_get()   → returns pointer into parent; do NOT call json_free().
+
+link "cJSON.c";
+link "json_parse_shim.c";
+
+// ── raw extern bindings ───────────────────────────────────────────────────────
+
+extern fn vit_json_parse(s: str) -> str;
+extern fn vit_json_free(j: str) -> i32;
+extern fn vit_json_valid(j: str) -> i32;
+
+extern fn vit_json_has(j: str, key: str) -> i32;
+extern fn vit_json_get_str(j: str, key: str) -> str;
+extern fn vit_json_get_int(j: str, key: str) -> i32;
+extern fn vit_json_get_float(j: str, key: str) -> f64;
+extern fn vit_json_get_bool(j: str, key: str) -> i32;
+extern fn vit_json_get_obj(j: str, key: str) -> str;
+
+extern fn vit_json_arr_len(j: str) -> i32;
+extern fn vit_json_arr_get(j: str, i: i32) -> str;
+extern fn vit_json_arr_get_str(j: str, i: i32) -> str;
+extern fn vit_json_arr_get_int(j: str, i: i32) -> i32;
+
+extern fn vit_json_is_null(j: str) -> i32;
+extern fn vit_json_is_str(j: str) -> i32;
+extern fn vit_json_is_int(j: str) -> i32;
+extern fn vit_json_is_bool(j: str) -> i32;
+extern fn vit_json_is_obj(j: str) -> i32;
+extern fn vit_json_is_arr(j: str) -> i32;
+
+extern fn vit_json_to_str(j: str) -> str;
+extern fn vit_json_str_free(s: str) -> i32;
+
+// ── high-level wrappers ───────────────────────────────────────────────────────
+
+// Parses a JSON string. Returns an opaque handle.
+// Always call json_free(j) when done to release memory.
+// Returns "" on parse error — check with json_valid(j).
+fn json_parse(s: str) -> str {
+    return vit_json_parse(s);
+}
+
+// Releases memory allocated by json_parse().
+// Do NOT call on handles returned by json_get_obj() or json_arr_get().
+fn json_free(j: str) -> i32 {
+    return vit_json_free(j);
+}
+
+// Returns 1 if the handle is valid (parse succeeded), 0 otherwise.
+fn json_valid(j: str) -> i32 {
+    return vit_json_valid(j);
+}
+
+// ── object field access ───────────────────────────────────────────────────────
+
+// Returns 1 if the key exists in object j.
+fn json_has(j: str, key: str) -> i32 {
+    return vit_json_has(j, key);
+}
+
+// Returns the string value of key, or "" if missing or not a string.
+fn json_get_str(j: str, key: str) -> str {
+    return vit_json_get_str(j, key);
+}
+
+// Returns the integer value of key, or 0 if missing or not a number.
+fn json_get_int(j: str, key: str) -> i32 {
+    return vit_json_get_int(j, key);
+}
+
+// Returns the float value of key, or 0.0 if missing or not a number.
+fn json_get_float(j: str, key: str) -> f64 {
+    return vit_json_get_float(j, key);
+}
+
+// Returns 1/0 for the boolean value of key, or 0 if missing.
+fn json_get_bool(j: str, key: str) -> i32 {
+    return vit_json_get_bool(j, key);
+}
+
+// Returns a handle to a nested object or array.
+// Do NOT call json_free() on the returned handle.
+fn json_get_obj(j: str, key: str) -> str {
+    return vit_json_get_obj(j, key);
+}
+
+// ── array access ──────────────────────────────────────────────────────────────
+
+// Returns the number of elements in a JSON array.
+fn json_arr_len(j: str) -> i32 {
+    return vit_json_arr_len(j);
+}
+
+// Returns a handle to the element at index i.
+// Do NOT call json_free() on the returned handle.
+fn json_arr_get(j: str, i: i32) -> str {
+    return vit_json_arr_get(j, i);
+}
+
+// Returns the string value of element i, or "" if not a string.
+fn json_arr_get_str(j: str, i: i32) -> str {
+    return vit_json_arr_get_str(j, i);
+}
+
+// Returns the integer value of element i, or 0 if not a number.
+fn json_arr_get_int(j: str, i: i32) -> i32 {
+    return vit_json_arr_get_int(j, i);
+}
+
+// ── type checks ───────────────────────────────────────────────────────────────
+
+fn json_is_null(j: str) -> i32  { return vit_json_is_null(j); }
+fn json_is_str(j: str) -> i32   { return vit_json_is_str(j); }
+fn json_is_int(j: str) -> i32   { return vit_json_is_int(j); }
+fn json_is_bool(j: str) -> i32  { return vit_json_is_bool(j); }
+fn json_is_obj(j: str) -> i32   { return vit_json_is_obj(j); }
+fn json_is_arr(j: str) -> i32   { return vit_json_is_arr(j); }
+
+// ── debug ─────────────────────────────────────────────────────────────────────
+
+// Serializes any JSON handle back to a string (unformatted).
+// The returned str is heap-allocated — call json_str_free() when done.
+fn json_to_str(j: str) -> str {
+    return vit_json_to_str(j);
+}
+
+fn json_str_free(s: str) -> i32 {
+    return vit_json_str_free(s);
+}

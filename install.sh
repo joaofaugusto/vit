@@ -103,6 +103,36 @@ for f in "$VIT_LIB"/*.vit; do
     echo "  $(basename "$f")"
 done
 
+# ── 3b. cJSON (bundled, zero apt deps) ────────────────────────────────────────
+#
+# json_parse.vit usa cJSON — single-file, MIT license.
+# Baixado diretamente do GitHub para ~/.vit/lib/ se ainda não estiver lá.
+
+CJSON_VER="v1.7.18"
+CJSON_BASE="https://raw.githubusercontent.com/DaveGamble/cJSON/${CJSON_VER}"
+
+download_file() {
+    local dest="$1" url="$2"
+    if [ -f "$dest" ]; then return 0; fi
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$url" -o "$dest" && return 0
+    fi
+    if command -v wget &>/dev/null; then
+        wget -qO "$dest" "$url" && return 0
+    fi
+    return 1
+}
+
+info "Baixando cJSON ${CJSON_VER}..."
+if download_file "$VIT_LIB/cJSON.c" "$CJSON_BASE/cJSON.c" && \
+   download_file "$VIT_LIB/cJSON.h" "$CJSON_BASE/cJSON.h"; then
+    success "cJSON instalado em $VIT_LIB"
+else
+    warn "Não foi possível baixar cJSON (sem curl/wget ou sem internet)."
+    warn "lib/json_parse.vit não funcionará até que cJSON.c e cJSON.h"
+    warn "sejam copiados manualmente para $VIT_LIB/"
+fi
+
 # ── 4. Verificar instalação ───────────────────────────────────────────────────
 
 echo
