@@ -293,6 +293,219 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    fn build_request_alloc_helpers(&mut self) {
+        let i8_type = self.context.i8_type();
+        let i8_ptr = i8_type.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let i64_type = self.context.i64_type();
+        let void_type = self.context.void_type();
+        let cap = 8192u64;
+        let arr_type = i8_ptr.array_type(cap as u32);
+
+        let malloc_fn = self.module.get_function("malloc").unwrap();
+        let free_fn = self.module.get_function("free").unwrap();
+        let strdup_fn = self.module.get_function("strdup").unwrap();
+
+        let allocs_g = self.module.get_global("__vit_req_allocs").unwrap_or_else(|| {
+            let g = self.module.add_global(arr_type, None, "__vit_req_allocs");
+            g.set_initializer(&arr_type.const_zero());
+            g
+        });
+        let count_g = self.module.get_global("__vit_req_alloc_count").unwrap_or_else(|| {
+            let g = self.module.add_global(i32_type, None, "__vit_req_alloc_count");
+            g.set_initializer(&i32_type.const_zero());
+            g
+        });
+        let enabled_g = self.module.get_global("__vit_req_alloc_enabled").unwrap_or_else(|| {
+            let g = self.module.add_global(i32_type, None, "__vit_req_alloc_enabled");
+            g.set_initializer(&i32_type.const_zero());
+            g
+        });
+        let allocs_ptr = allocs_g.as_pointer_value();
+        let count_ptr = count_g.as_pointer_value();
+        let enabled_ptr = enabled_g.as_pointer_value();
+
+        {
+            let f = self.module.add_function("__vit_req_begin", void_type.fn_type(&[], false), None);
+            let entry = self.context.append_basic_block(f, "entry");
+            self.builder.position_at_end(entry);
+            self.builder.build_store(count_ptr, i32_type.const_zero()).unwrap();
+            self.builder.build_store(enabled_ptr, i32_type.const_int(1, false)).unwrap();
+            self.builder.build_return(None).unwrap();
+        }
+
+        {
+            let f = self.module.add_function("__vit_req_track", i8_ptr.fn_type(&[i8_ptr.into()], false), None);
+            let entry = self.context.append_basic_block(f, "entry");
+            let ret_bb = self.context.append_basic_block(f, "ret");
+            let do_track_bb = self.context.append_basic_block(f, "track");
+            self.builder.position_at_end(entry);
+
+            let ptr = f.get_nth_param(0).unwrap().into_pointer_value();
+            let ptr_is_null = self.builder.build_is_null(ptr, "ptr_is_null").unwrap();
+            let enabled = self.builder.build_load(i32_type, enabled_ptr, "enabled").unwrap().into_int_value();
+            let is_enabled = self.builder.build_int_compare(IntPredicate::NE, enabled, i32_type.const_zero(), "is_enabled").unwrap();
+            let ptr_not_null = self.builder.build_int_compare(
+                IntPredicate::EQ,
+                ptr_is_null,
+                self.context.bool_type().const_zero(),
+                "ptr_not_null"
+            ).unwrap();
+            let can_try = self.builder.build_and(ptr_not_null, is_enabled, "can_try").unwrap();
+            self.builder.build_conditional_branch(can_try, do_track_bb, ret_bb).unwrap();
+
+            self.builder.position_at_end(do_track_bb);
+            let count = self.builder.build_load(i32_type, count_ptr, "count").unwrap().into_int_value();
+            let under_cap = self.builder.build_int_compare(
+                IntPredicate::ULT,
+                count,
+                i32_type.const_int(cap, false),
+                "under_cap"
+            ).unwrap();
+            let store_bb = self.context.append_basic_block(f, "store");
+            self.builder.build_conditional_branch(under_cap, store_bb, ret_bb).unwrap();
+
+            self.builder.position_at_end(store_bb);
+            let zero = i32_type.const_zero();
+            let slot = unsafe { self.builder.build_gep(arr_type, allocs_ptr, &[zero, count], "slot") }.unwrap();
+            self.builder.build_store(slot, ptr).unwrap();
+            let next = self.builder.build_int_add(count, i32_type.const_int(1, false), "next").unwrap();
+            self.builder.build_store(count_ptr, next).unwrap();
+            self.builder.build_unconditional_branch(ret_bb).unwrap();
+
+            self.builder.position_at_end(ret_bb);
+            self.builder.build_return(Some(&ptr)).unwrap();
+        }
+
+        {
+            let f = self.module.add_function("__vit_req_free", void_type.fn_type(&[i8_ptr.into()], false), None);
+            let entry = self.context.append_basic_block(f, "entry");
+            let scan_bb = self.context.append_basic_block(f, "scan");
+            let body_bb = self.context.append_basic_block(f, "body");
+            let next_bb = self.context.append_basic_block(f, "next");
+            let after_bb = self.context.append_basic_block(f, "after");
+            self.builder.position_at_end(entry);
+
+            let target = f.get_nth_param(0).unwrap().into_pointer_value();
+            let idx_ptr = self.builder.build_alloca(i32_type, "idx").unwrap();
+            self.builder.build_store(idx_ptr, i32_type.const_zero()).unwrap();
+            let target_is_null = self.builder.build_is_null(target, "target_is_null").unwrap();
+            self.builder.build_conditional_branch(target_is_null, after_bb, scan_bb).unwrap();
+
+            self.builder.position_at_end(scan_bb);
+            let idx = self.builder.build_load(i32_type, idx_ptr, "idxv").unwrap().into_int_value();
+            let count = self.builder.build_load(i32_type, count_ptr, "count").unwrap().into_int_value();
+            let done = self.builder.build_int_compare(IntPredicate::UGE, idx, count, "done").unwrap();
+            self.builder.build_conditional_branch(done, after_bb, body_bb).unwrap();
+
+            self.builder.position_at_end(body_bb);
+            let zero = i32_type.const_zero();
+            let slot = unsafe { self.builder.build_gep(arr_type, allocs_ptr, &[zero, idx], "slot") }.unwrap();
+            let tracked = self.builder.build_load(i8_ptr, slot, "tracked").unwrap().into_pointer_value();
+            let same = self.builder.build_int_compare(
+                IntPredicate::EQ,
+                self.builder.build_ptr_to_int(tracked, i64_type, "tracked_i").unwrap(),
+                self.builder.build_ptr_to_int(target, i64_type, "target_i").unwrap(),
+                "same"
+            ).unwrap();
+            let clear_bb = self.context.append_basic_block(f, "clear");
+            self.builder.build_conditional_branch(same, clear_bb, next_bb).unwrap();
+
+            self.builder.position_at_end(clear_bb);
+            self.builder.build_store(slot, i8_ptr.const_null()).unwrap();
+            self.builder.build_unconditional_branch(next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            let idx2 = self.builder.build_load(i32_type, idx_ptr, "idx2").unwrap().into_int_value();
+            let next = self.builder.build_int_add(idx2, i32_type.const_int(1, false), "next").unwrap();
+            self.builder.build_store(idx_ptr, next).unwrap();
+            self.builder.build_unconditional_branch(scan_bb).unwrap();
+
+            self.builder.position_at_end(after_bb);
+            self.builder.build_call(free_fn, &[target.into()], "").unwrap();
+            self.builder.build_return(None).unwrap();
+        }
+
+        {
+            let f = self.module.add_function("__vit_req_free_all", void_type.fn_type(&[], false), None);
+            let entry = self.context.append_basic_block(f, "entry");
+            let scan_bb = self.context.append_basic_block(f, "scan");
+            let body_bb = self.context.append_basic_block(f, "body");
+            let next_bb = self.context.append_basic_block(f, "next");
+            let after_bb = self.context.append_basic_block(f, "after");
+            self.builder.position_at_end(entry);
+
+            let idx_ptr = self.builder.build_alloca(i32_type, "idx").unwrap();
+            self.builder.build_store(idx_ptr, i32_type.const_zero()).unwrap();
+            self.builder.build_unconditional_branch(scan_bb).unwrap();
+
+            self.builder.position_at_end(scan_bb);
+            let idx = self.builder.build_load(i32_type, idx_ptr, "idxv").unwrap().into_int_value();
+            let count = self.builder.build_load(i32_type, count_ptr, "count").unwrap().into_int_value();
+            let done = self.builder.build_int_compare(IntPredicate::UGE, idx, count, "done").unwrap();
+            self.builder.build_conditional_branch(done, after_bb, body_bb).unwrap();
+
+            self.builder.position_at_end(body_bb);
+            let zero = i32_type.const_zero();
+            let slot = unsafe { self.builder.build_gep(arr_type, allocs_ptr, &[zero, idx], "slot") }.unwrap();
+            let tracked = self.builder.build_load(i8_ptr, slot, "tracked").unwrap().into_pointer_value();
+            let is_null = self.builder.build_is_null(tracked, "is_null").unwrap();
+            let free_one_bb = self.context.append_basic_block(f, "free_one");
+            self.builder.build_conditional_branch(is_null, next_bb, free_one_bb).unwrap();
+
+            self.builder.position_at_end(free_one_bb);
+            self.builder.build_call(free_fn, &[tracked.into()], "").unwrap();
+            self.builder.build_store(slot, i8_ptr.const_null()).unwrap();
+            self.builder.build_unconditional_branch(next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            let idx2 = self.builder.build_load(i32_type, idx_ptr, "idx2").unwrap().into_int_value();
+            let next = self.builder.build_int_add(idx2, i32_type.const_int(1, false), "next").unwrap();
+            self.builder.build_store(idx_ptr, next).unwrap();
+            self.builder.build_unconditional_branch(scan_bb).unwrap();
+
+            self.builder.position_at_end(after_bb);
+            self.builder.build_store(count_ptr, i32_type.const_zero()).unwrap();
+            self.builder.build_return(None).unwrap();
+        }
+
+        {
+            let free_all_fn = self.module.get_function("__vit_req_free_all").unwrap();
+            let f = self.module.add_function("__vit_req_end", void_type.fn_type(&[], false), None);
+            let entry = self.context.append_basic_block(f, "entry");
+            self.builder.position_at_end(entry);
+            self.builder.build_call(free_all_fn, &[], "").unwrap();
+            self.builder.build_store(enabled_ptr, i32_type.const_zero()).unwrap();
+            self.builder.build_return(None).unwrap();
+        }
+
+        {
+            let track_fn = self.module.get_function("__vit_req_track").unwrap();
+            let f = self.module.add_function("__vit_req_alloc", i8_ptr.fn_type(&[i64_type.into()], false), None);
+            let entry = self.context.append_basic_block(f, "entry");
+            self.builder.position_at_end(entry);
+            let size = f.get_nth_param(0).unwrap().into_int_value();
+            let ptr = self.builder.build_call(malloc_fn, &[size.into()], "ptr").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+            let tracked = self.builder.build_call(track_fn, &[ptr.into()], "tracked").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+            self.builder.build_return(Some(&tracked)).unwrap();
+        }
+
+        {
+            let track_fn = self.module.get_function("__vit_req_track").unwrap();
+            let f = self.module.add_function("__vit_req_strdup", i8_ptr.fn_type(&[i8_ptr.into()], false), None);
+            let entry = self.context.append_basic_block(f, "entry");
+            self.builder.position_at_end(entry);
+            let src = f.get_nth_param(0).unwrap().into_pointer_value();
+            let ptr = self.builder.build_call(strdup_fn, &[src.into()], "ptr").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+            let tracked = self.builder.build_call(track_fn, &[ptr.into()], "tracked").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+            self.builder.build_return(Some(&tracked)).unwrap();
+        }
+    }
+
     // Emits __vit_cmp_i32, __vit_cmp_i64, __vit_cmp_f64 for qsort
     fn build_sort_comparators(&mut self) {
         let i8_ptr   = self.context.i8_type().ptr_type(AddressSpace::default());
@@ -359,7 +572,7 @@ impl<'ctx> Codegen<'ctx> {
         let s2 = function.get_nth_param(1).unwrap().into_pointer_value();
 
         let strlen = self.module.get_function("strlen").unwrap();
-        let malloc = self.module.get_function("malloc").unwrap();
+        let malloc = self.module.get_function("__vit_req_alloc").unwrap();
         let strcpy = self.module.get_function("strcpy").unwrap();
         let strcat = self.module.get_function("strcat").unwrap();
 
@@ -391,7 +604,7 @@ impl<'ctx> Codegen<'ctx> {
 
         let strstr = self.module.get_function("strstr").unwrap();
         let strlen = self.module.get_function("strlen").unwrap();
-        let malloc = self.module.get_function("malloc").unwrap();
+        let malloc = self.module.get_function("__vit_req_alloc").unwrap();
         let memcpy = self.module.get_function("memcpy").unwrap();
         let strcpy = self.module.get_function("strcpy").unwrap();
 
@@ -442,7 +655,7 @@ impl<'ctx> Codegen<'ctx> {
 
         let strstr = self.module.get_function("strstr").unwrap();
         let strlen = self.module.get_function("strlen").unwrap();
-        let malloc = self.module.get_function("malloc").unwrap();
+        let malloc = self.module.get_function("__vit_req_alloc").unwrap();
         let memcpy = self.module.get_function("memcpy").unwrap();
         let strcpy = self.module.get_function("strcpy").unwrap();
 
@@ -502,7 +715,7 @@ impl<'ctx> Codegen<'ctx> {
         let arr = function.get_nth_param(2).unwrap().into_pointer_value();
         let max = function.get_nth_param(3).unwrap().into_int_value();
 
-        let strdup = self.module.get_function("strdup").unwrap();
+        let strdup = self.module.get_function("__vit_req_strdup").unwrap();
         let strtok = self.module.get_function("strtok").unwrap();
 
         // copy = strdup(s)  — strtok needs a mutable buffer
@@ -2168,6 +2381,7 @@ impl<'ctx> Codegen<'ctx> {
         self.declare_scanf();
         self.declare_string_builtins();
         self.declare_math_builtins();
+        self.build_request_alloc_helpers();
         self.build_sort_comparators();
         self.build_strbuf_helpers();         // needs malloc / strlen / memcpy / realloc / free
         self.build_vit_add();
@@ -3019,7 +3233,7 @@ impl<'ctx> Codegen<'ctx> {
         if name == "int_to_str" {
             if arguments.len() != 1 { return Err("int_to_str() takes 1 argument".to_string()); }
             let val = self.generate_expression(&arguments[0])?;
-            let malloc   = self.module.get_function("malloc").unwrap();
+            let malloc   = self.module.get_function("__vit_req_alloc").unwrap();
             let sprintf  = self.module.get_function("sprintf").unwrap();
             let buf = self.builder.build_call(malloc, &[self.context.i64_type().const_int(32, false).into()], "buf").unwrap()
                 .try_as_basic_value().left().unwrap().into_pointer_value();
@@ -3218,7 +3432,7 @@ impl<'ctx> Codegen<'ctx> {
             }
 
             let ptr = self.generate_expression(&arguments[0])?.into_pointer_value();
-            let free_fn = self.module.get_function("free").unwrap();
+            let free_fn = self.module.get_function("__vit_req_free").unwrap();
             self.builder.build_call(free_fn, &[ptr.into()], "free_call").unwrap();
             return Ok(self.context.i32_type().const_int(0, false).into());
         }
@@ -3244,7 +3458,7 @@ impl<'ctx> Codegen<'ctx> {
                 return Err("format() requires at least a format string".to_string());
             }
             let i64_type  = self.context.i64_type();
-            let malloc_fn = self.module.get_function("malloc").unwrap();
+            let malloc_fn = self.module.get_function("__vit_req_alloc").unwrap();
             let sprintf   = self.module.get_function("sprintf").unwrap();
 
             let buf = self.builder.build_call(
@@ -3273,7 +3487,7 @@ impl<'ctx> Codegen<'ctx> {
             let i32_type  = self.context.i32_type();
             let i64_type  = self.context.i64_type();
             let i8_ptr    = i8_type.ptr_type(AddressSpace::default());
-            let malloc_fn = self.module.get_function("malloc").unwrap();
+            let malloc_fn = self.module.get_function("__vit_req_alloc").unwrap();
             let strncpy   = self.module.get_function("strncpy").unwrap();
 
             let s_val     = self.generate_expression(&arguments[0])?.into_pointer_value();
@@ -3439,6 +3653,8 @@ impl<'ctx> Codegen<'ctx> {
             let tcp_close_fn  = self.module.get_function("__vit_tcp_close").unwrap();
             let strcmp_fn     = self.module.get_function("strcmp").unwrap();
             let free_fn       = self.module.get_function("free").unwrap();
+            let req_begin_fn  = self.module.get_function("__vit_req_begin").unwrap();
+            let req_end_fn    = self.module.get_function("__vit_req_end").unwrap();
             let http_read_fn = self.module.get_function("http_read")
                 .ok_or_else(|| "http_listen(): http_read not found - did you import lib/http.vit?".to_string())?;
             let http_send_fn = self.module.get_function("http_send")
@@ -3489,6 +3705,7 @@ impl<'ctx> Codegen<'ctx> {
                 .unwrap().try_as_basic_value().left().unwrap().into_int_value();
             let cli_slot = self.builder.build_alloca(i32_type, "cli_slot").unwrap();
             self.builder.build_store(cli_slot, client_fd).unwrap();
+            self.builder.build_call(req_begin_fn, &[], "").unwrap();
 
             let buf = self.builder
                 .build_call(http_read_fn, &[client_fd.into()], "rbuf")
@@ -3579,6 +3796,7 @@ impl<'ctx> Codegen<'ctx> {
             let cli  = self.builder.build_load(i32_type, cli_slot, "cli2").unwrap().into_int_value();
             self.builder.build_call(http_send_fn, &[cli.into(), final_resp2.into()], "nsent").unwrap();
             self.builder.build_call(http_request_free_fn, &[req_slot.into()], "free_req").unwrap();
+            self.builder.build_call(req_end_fn, &[], "").unwrap();
             self.builder.build_call(tcp_close_fn, &[cli.into()], "closed").unwrap();
             self.builder.build_unconditional_branch(accept_bb).unwrap();
 

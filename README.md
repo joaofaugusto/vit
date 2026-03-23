@@ -929,7 +929,7 @@ struct Response {
 | `http_handle(method, path, fn)` | Registra handler |
 | `http_listen(port)` | Inicia loop de atendimento com read/send completos |
 
-`http_listen()` agora faz cleanup automÃ¡tico do buffer bruto da request, do `Request` parseado e do `Response.headers` quando o handler retorna `Response`. Isso reduz bastante a pressÃ£o de memÃ³ria em servidores de longa duraÃ§Ã£o sem exigir `defer`.
+`http_listen()` agora faz cleanup automÃ¡tico do buffer bruto da request, do `Request` parseado, do `Response.headers` quando o handler retorna `Response` e das strings temporÃ¡rias alocadas pelos helpers de string durante o handling da request. Isso reduz bastante a pressÃ£o de memÃ³ria em servidores de longa duraÃ§Ã£o sem exigir `defer`.
 
 ```vit
 import "lib/http.vit";
