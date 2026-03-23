@@ -59,7 +59,7 @@ done
 
 echo
 info "Verificando instalação..."
-vit --help > /dev/null 2>&1 && success "vit está funcionando." || error "Algo deu errado."
+command -v vit &>/dev/null && success "vit está funcionando." || error "Binário não encontrado no PATH."
 
 echo
 success "Pronto! Experimente:"

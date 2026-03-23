@@ -43,6 +43,7 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "-h" | "--help" => { print_usage(); process::exit(0); }
             "-v" | "--verbose"                => verbose = true,
             "run"   if positional.is_empty()  => do_run = true,
             "build" if positional.is_empty()  => {}
