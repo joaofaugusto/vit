@@ -861,6 +861,13 @@ struct Request {
     body:    str,
     headers: map[str, str],
 }
+
+struct Response {
+    status:       i32,
+    content_type: str,
+    body:         str,
+    headers:      StrBuf,
+}
 ```
 
 #### Parsing e roteamento
@@ -868,6 +875,8 @@ struct Request {
 | Função | Descrição |
 |--------|-----------|
 | `http_parse(buf)` | Parseia raw HTTP/1.x, retorna `Request` |
+| `http_read(fd)` | Lê uma request HTTP completa (até 1 MB) |
+| `http_read_max(fd, max_bytes)` | Lê request HTTP com limite explícito |
 | `http_is(req, method, path)` | Match exato de método + path (ignora query string) |
 | `http_starts_with(req, method, prefix)` | Match de prefixo (rotas dinâmicas) |
 | `http_path_clean(req)` | Path sem query string |
@@ -890,6 +899,11 @@ struct Request {
 
 | Função | Status |
 |--------|--------|
+| `http_response(status, content_type, body)` | Cria `Response` |
+| `http_with_header(resp, name, value)` | Adiciona header customizado |
+| `http_build(resp)` | Serializa com `Content-Length` automático |
+| `http_text_response(status, body)` | Builder `text/plain` |
+| `http_json_response(status, body)` | Builder `application/json` |
 | `http_ok(body)` | 200 text/plain |
 | `http_json(body)` | 200 application/json |
 | `http_created(body)` | 201 text/plain |
@@ -907,7 +921,7 @@ struct Request {
 | Função | Descrição |
 |--------|-----------|
 | `http_handle(method, path, fn)` | Registra handler |
-| `http_listen(port)` | Inicia loop de atendimento |
+| `http_listen(port)` | Inicia loop de atendimento com read/send completos |
 
 ```vit
 import "lib/http.vit";
@@ -917,8 +931,18 @@ fn handle_hello(req: Request) -> str {
     return http_json(format("{\"hello\":\"%s\"}", name));
 }
 
+fn handle_created(req: Request) -> str {
+    let resp: Response = http_with_header(
+        http_json_response(201, "{\"ok\":true}"),
+        "X-Powered-By",
+        "Vit"
+    );
+    return http_build(resp);
+}
+
 fn main() -> i32 {
     http_handle("GET", "/hello", handle_hello);
+    http_handle("POST", "/items", handle_created);
     http_listen(8080);
     return 0;
 }

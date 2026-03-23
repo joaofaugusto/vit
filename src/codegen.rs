@@ -3345,12 +3345,15 @@ impl<'ctx> Codegen<'ctx> {
 
             let tcp_listen_fn = self.module.get_function("__vit_tcp_listen").unwrap();
             let tcp_accept_fn = self.module.get_function("__vit_tcp_accept").unwrap();
-            let tcp_recv_fn   = self.module.get_function("__vit_tcp_recv").unwrap();
-            let tcp_write_fn  = self.module.get_function("__vit_tcp_send").unwrap();
             let tcp_close_fn  = self.module.get_function("__vit_tcp_close").unwrap();
-            let malloc_fn     = self.module.get_function("malloc").unwrap();
-            let strlen_fn     = self.module.get_function("strlen").unwrap();
             let strcmp_fn     = self.module.get_function("strcmp").unwrap();
+            let strlen_fn     = self.module.get_function("strlen").unwrap();
+            let http_read_fn = self.module.get_function("http_read")
+                .ok_or_else(|| "http_listen(): http_read not found — did you import lib/http.vit?".to_string())?;
+            let http_send_fn = self.module.get_function("http_send")
+                .ok_or_else(|| "http_listen(): http_send not found — did you import lib/http.vit?".to_string())?;
+            let http_not_found_fn = self.module.get_function("http_not_found")
+                .ok_or_else(|| "http_listen(): http_not_found not found — did you import lib/http.vit?".to_string())?;
             let http_parse_fn = self.module.get_function("http_parse")
                 .ok_or_else(|| "http_listen(): http_parse not found — did you import lib/http.vit?".to_string())?;
 
@@ -3395,13 +3398,8 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_store(cli_slot, client_fd).unwrap();
 
             let buf = self.builder
-                .build_call(malloc_fn, &[i64_type.const_int(4096, false).into()], "rbuf")
+                .build_call(http_read_fn, &[client_fd.into()], "rbuf")
                 .unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
-            self.builder.build_call(
-                tcp_recv_fn,
-                &[client_fd.into(), buf.into(), i32_type.const_int(4095, false).into()],
-                "nrd",
-            ).unwrap();
 
             let req_val = self.builder
                 .build_call(http_parse_fn, &[buf.into()], "req_val")
@@ -3519,12 +3517,9 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.position_at_end(dispatch_done_bb);
             let resp_val = self.builder.build_load(i8_ptr, resp_slot, "respv").unwrap().into_pointer_value();
             let is_null  = self.builder.build_is_null(resp_val, "isnull").unwrap();
-            // Use a hardcoded 404 if no route matched
             let not_found_str = self.builder
-                .build_global_string_ptr(
-                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found",
-                    "nf_str",
-                ).unwrap().as_pointer_value();
+                .build_call(http_not_found_fn, &[], "nf_str")
+                .unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
             let final_resp = self.builder
                 .build_select(is_null, not_found_str, resp_val, "final_resp").unwrap()
                 .into_pointer_value();
@@ -3536,11 +3531,7 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.position_at_end(send_bb);
             let final_resp2 = self.builder.build_load(i8_ptr, resp_slot, "final_resp2").unwrap().into_pointer_value();
             let cli  = self.builder.build_load(i32_type, cli_slot, "cli2").unwrap().into_int_value();
-            let rlen = self.builder
-                .build_call(strlen_fn, &[final_resp2.into()], "rlen")
-                .unwrap().try_as_basic_value().left().unwrap().into_int_value();
-            let rlen32 = self.builder.build_int_truncate_or_bit_cast(rlen, i32_type, "rlen32").unwrap();
-            self.builder.build_call(tcp_write_fn, &[cli.into(), final_resp2.into(), rlen32.into()], "nsent").unwrap();
+            self.builder.build_call(http_send_fn, &[cli.into(), final_resp2.into()], "nsent").unwrap();
             self.builder.build_call(tcp_close_fn, &[cli.into()], "closed").unwrap();
             self.builder.build_unconditional_branch(accept_bb).unwrap();
 
@@ -3562,24 +3553,47 @@ impl<'ctx> Codegen<'ctx> {
         for (i, arg) in arguments.iter().enumerate() {
             // Local array: pass pointer to first element instead of loading the array
             // Struct variable: pass pointer to the struct
-            let special = if let Expression::Identifier(aname) = arg {
-                if let Some(&(arr_ptr, BasicTypeEnum::ArrayType(at))) = self.variables.get(aname.as_str()) {
-                    Some({
-                        let zero = self.context.i32_type().const_int(0, false);
-                        let first = unsafe {
-                            self.builder.build_gep(at, arr_ptr, &[zero, zero], "arr_arg")
-                        }.unwrap();
-                        BasicValueEnum::from(first)
-                    })
-                } else if self.var_struct_names.contains_key(aname.as_str()) {
-                    // Pass a pointer to the struct (its alloca)
-                    let (alloca, _) = *self.variables.get(aname.as_str()).unwrap();
-                    Some(BasicValueEnum::from(alloca))
-                } else {
-                    None
+            let special = match arg {
+                Expression::Identifier(aname) => {
+                    if let Some(&(arr_ptr, BasicTypeEnum::ArrayType(at))) = self.variables.get(aname.as_str()) {
+                        Some({
+                            let zero = self.context.i32_type().const_int(0, false);
+                            let first = unsafe {
+                                self.builder.build_gep(at, arr_ptr, &[zero, zero], "arr_arg")
+                            }.unwrap();
+                            BasicValueEnum::from(first)
+                        })
+                    } else if self.var_struct_names.contains_key(aname.as_str()) {
+                        // Pass a pointer to the struct (its alloca)
+                        let (alloca, _) = *self.variables.get(aname.as_str()).unwrap();
+                        Some(BasicValueEnum::from(alloca))
+                    } else {
+                        None
+                    }
                 }
-            } else {
-                None
+                Expression::FieldAccess { object, field } => {
+                    if let Ok((struct_ptr, struct_name)) = self.resolve_struct_ptr(object) {
+                        if let Some((st, field_names)) = self.struct_defs.get(&struct_name).cloned() {
+                            if let Some(idx) = field_names.iter().position(|n| n == field) {
+                                if let Some(BasicTypeEnum::StructType(_)) = st.get_field_type_at_index(idx as u32) {
+                                    let field_ptr = self.builder
+                                        .build_struct_gep(st, struct_ptr, idx as u32, "struct_field_arg")
+                                        .unwrap();
+                                    Some(BasicValueEnum::from(field_ptr))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
             };
             let val = if let Some(v) = special {
                 v

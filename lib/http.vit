@@ -1,45 +1,28 @@
-// lib/http.vit — HTTP server helpers for vit
+// lib/http.vit -- HTTP server helpers for Vit
 // Usage: import "lib/http.vit";
 //
 // Depends on lib/net.vit (imported automatically).
-//
-// Networking API:
-//   http_serve(port)                          -> i32   (fd of listening socket)
-//   http_accept(server_fd)                    -> i32   (client fd)
-//   http_recv(fd, buf, size)                  -> i32   (bytes read)
-//   http_send(fd, response)                   -> i32   (bytes sent)
-//   http_close(fd)                            -> i32
-//
-// Parsing API:
-//   http_parse(buf)                           -> Request
-//   http_method(req: Request)                 -> str
-//   http_path(req: Request)                   -> str
-//   http_body(req: Request)                   -> str
-//   http_header(req: Request, name: str)      -> str   (header value or "")
-//
-// Routing API:
-//   http_is(req, method, path)                -> i32   (exact match)
-//   http_starts_with(req, method, prefix)     -> i32   (path prefix match)
-//
-// Response builders:
-//   http_ok(body)                             -> str   (200 text/plain)
-//   http_json(body)                           -> str   (200 application/json)
-//   http_not_found()                          -> str   (404)
-//   http_bad_request(msg)                     -> str   (400)
-//   http_error(msg)                           -> str   (500)
+// Links a small C shim for robust request reads and full writes.
 
 import "net.vit";
+link "http_runtime_shim.c";
 
-// ── Request struct ────────────────────────────────────────────────────────────
+extern fn vit_http_read_request(fd: i32, max_bytes: i32) -> str;
+extern fn vit_http_send_all(fd: i32, data: str, len: i32) -> i32;
 
 struct Request {
-    method:  str,
-    path:    str,
-    body:    str,
+    method: str,
+    path: str,
+    body: str,
     headers: map[str, str],
 }
 
-// ── Socket helpers (thin wrappers over net.vit) ───────────────────────────────
+struct Response {
+    status: i32,
+    content_type: str,
+    body: str,
+    headers: StrBuf,
+}
 
 fn http_serve(port: i32) -> i32 {
     return tcp_listen(port);
@@ -53,36 +36,33 @@ fn http_recv(fd: i32, buf: str, size: i32) -> i32 {
     return tcp_read(fd, buf, size);
 }
 
-// http_read(fd) -> str
-// Allocates an internal buffer, reads from fd, returns it as str.
 fn http_read(fd: i32) -> str {
-    let buf: str = malloc(4096);
-    tcp_read(fd, buf, 4095);
-    return buf;
+    return vit_http_read_request(fd, 1048576);
+}
+
+fn http_read_max(fd: i32, max_bytes: i32) -> str {
+    return vit_http_read_request(fd, max_bytes);
 }
 
 fn http_send(fd: i32, response: str) -> i32 {
-    let n: i32 = len(response);
-    return tcp_write(fd, response, n);
+    return vit_http_send_all(fd, response, len(response));
+}
+
+fn http_send_all(fd: i32, response: str) -> i32 {
+    return vit_http_send_all(fd, response, len(response));
 }
 
 fn http_close(fd: i32) -> i32 {
     return tcp_close(fd);
 }
 
-// ── Parsing ───────────────────────────────────────────────────────────────────
-
-// http_parse(buf) -> Request
-// Parses an HTTP/1.x request: method, path, headers (map[str,str]), and body.
 fn http_parse(buf: str) -> Request {
-    // ── method: up to first space ─────────────────────────────────────────────
     let method: str = "";
     let method_end: i32 = str_pos(buf, " ");
     if method_end >= 0 {
         method = substr(buf, 0, method_end);
     }
 
-    // ── path: between first and second space ──────────────────────────────────
     let path: str = "";
     if method_end >= 0 {
         let path_start: i32 = method_end + 1;
@@ -93,7 +73,6 @@ fn http_parse(buf: str) -> Request {
         }
     }
 
-    // ── headers: lines between first \r\n and \r\n\r\n ────────────────────────
     let headers: map[str, str];
     let first_crlf: i32 = str_pos(buf, "\r\n");
     let headers_end: i32 = str_pos(buf, "\r\n\r\n");
@@ -102,7 +81,6 @@ fn http_parse(buf: str) -> Request {
         if headers_end > first_crlf {
             let pos: i32 = first_crlf + 2;
             while pos < headers_end {
-                // +2 so the last header line's \r\n is included in remaining
                 let remaining: str = substr(buf, pos, headers_end + 2 - pos);
                 let line_len: i32 = str_pos(remaining, "\r\n");
                 if line_len <= 0 {
@@ -121,17 +99,19 @@ fn http_parse(buf: str) -> Request {
         }
     }
 
-    // ── body: content after \r\n\r\n ──────────────────────────────────────────
     let body: str = "";
     if headers_end >= 0 {
-        body = substr(buf, headers_end + 4, 8192);
+        body = substr(buf, headers_end + 4, 1048576);
     }
 
-    let req: Request = Request { method: method, path: path, body: body, headers: headers };
+    let req: Request = Request {
+        method: method,
+        path: path,
+        body: body,
+        headers: headers
+    };
     return req;
 }
-
-// ── Accessors ─────────────────────────────────────────────────────────────────
 
 fn http_method(req: Request) -> str {
     return req.method;
@@ -145,8 +125,6 @@ fn http_body(req: Request) -> str {
     return req.body;
 }
 
-// http_header(req, name) -> str
-// Returns the value of the named header, or "" if not present.
 fn http_header(req: Request, name: str) -> str {
     let headers: map[str, str] = req.headers;
     if map_has(headers, name) {
@@ -155,10 +133,6 @@ fn http_header(req: Request, name: str) -> str {
     return "";
 }
 
-// ── Route matching ────────────────────────────────────────────────────────────
-
-// http_path_clean(req) -> str
-// Returns the path without the query string ("/users?page=2" → "/users").
 fn http_path_clean(req: Request) -> str {
     let q: i32 = str_pos(req.path, "?");
     if q < 0 {
@@ -167,8 +141,6 @@ fn http_path_clean(req: Request) -> str {
     return substr(req.path, 0, q);
 }
 
-// http_is(req, method, path) -> i32
-// Returns 1 if both method and path match exactly (ignores query string).
 fn http_is(req: Request, method: str, path: str) -> i32 {
     if strcmp(req.method, method) == 0 {
         if strcmp(http_path_clean(req), path) == 0 {
@@ -178,8 +150,6 @@ fn http_is(req: Request, method: str, path: str) -> i32 {
     return 0;
 }
 
-// http_starts_with(req, method, prefix) -> i32
-// Returns 1 if method matches and path starts with prefix (ignores query string).
 fn http_starts_with(req: Request, method: str, prefix: str) -> i32 {
     if strcmp(req.method, method) == 0 {
         let pos: i32 = str_pos(http_path_clean(req), prefix);
@@ -190,11 +160,6 @@ fn http_starts_with(req: Request, method: str, prefix: str) -> i32 {
     return 0;
 }
 
-// ── Form helpers ──────────────────────────────────────────────────────────────
-
-// form_get(body, key) -> str
-// Extracts a value from a "key=val&key2=val2" form-urlencoded body.
-// Returns "" if the key is not present.
 fn form_get(body: str, key: str) -> str {
     let search: str = format("%s=", key);
     let pos: i32 = str_pos(body, search);
@@ -203,7 +168,7 @@ fn form_get(body: str, key: str) -> str {
     }
     let key_len: i32 = len(key);
     let val_start: i32 = pos + key_len + 1;
-    let rest: str = substr(body, val_start, 256);
+    let rest: str = substr(body, val_start, 1024);
     let amp: i32 = str_pos(rest, "&");
     if amp < 0 {
         return rest;
@@ -211,8 +176,6 @@ fn form_get(body: str, key: str) -> str {
     return substr(rest, 0, amp);
 }
 
-// form_has(body, key) -> i32
-// Returns 1 if the key is present in the form body, 0 otherwise.
 fn form_has(body: str, key: str) -> i32 {
     let search: str = format("%s=", key);
     let pos: i32 = str_pos(body, search);
@@ -222,10 +185,6 @@ fn form_has(body: str, key: str) -> i32 {
     return 1;
 }
 
-// ── Query string helpers ──────────────────────────────────────────────────────
-
-// query_str(req) -> str
-// Returns the raw query string ("page=2&limit=10"), or "" if none.
 fn query_str(req: Request) -> str {
     let q: i32 = str_pos(req.path, "?");
     if q < 0 {
@@ -234,60 +193,102 @@ fn query_str(req: Request) -> str {
     return substr(req.path, q + 1, 1024);
 }
 
-// query_get(req, key) -> str
-// Extracts a value from the query string. Returns "" if key not present.
 fn query_get(req: Request, key: str) -> str {
     return form_get(query_str(req), key);
 }
 
-// query_has(req, key) -> i32
-// Returns 1 if the key is present in the query string, 0 otherwise.
 fn query_has(req: Request, key: str) -> i32 {
     return form_has(query_str(req), key);
 }
 
-// ── Response builders ─────────────────────────────────────────────────────────
+fn http_reason_phrase(status: i32) -> str {
+    if status == 200 { return "OK"; }
+    if status == 201 { return "Created"; }
+    if status == 204 { return "No Content"; }
+    if status == 400 { return "Bad Request"; }
+    if status == 401 { return "Unauthorized"; }
+    if status == 403 { return "Forbidden"; }
+    if status == 404 { return "Not Found"; }
+    if status == 422 { return "Unprocessable Entity"; }
+    if status == 500 { return "Internal Server Error"; }
+    return "OK";
+}
+
+fn http_response(status: i32, content_type: str, body: str) -> Response {
+    let headers: StrBuf = strbuf_new();
+    let resp: Response = Response {
+        status: status,
+        content_type: content_type,
+        body: body,
+        headers: headers
+    };
+    return resp;
+}
+
+fn http_with_header(resp: Response, name: str, value: str) -> Response {
+    strbuf_append(resp.headers, format("%s: %s\r\n", name, value));
+    return resp;
+}
+
+fn http_text_response(status: i32, body: str) -> Response {
+    return http_response(status, "text/plain", body);
+}
+
+fn http_json_response(status: i32, body: str) -> Response {
+    return http_response(status, "application/json", body);
+}
+
+fn http_build(resp: Response) -> str {
+    let status_line: str = format("HTTP/1.1 %d %s\r\n", resp.status, http_reason_phrase(resp.status));
+    let base_headers: str = format(
+        "Content-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n",
+        resp.content_type,
+        len(resp.body)
+    );
+    let extra_headers: str = strbuf_to_str(resp.headers);
+    return format("%s%s%s\r\n%s", status_line, base_headers, extra_headers, resp.body);
+}
 
 fn http_ok(body: str) -> str {
-    return format("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", body);
+    return http_build(http_text_response(200, body));
 }
 
 fn http_json(body: str) -> str {
-    return format("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n%s", body);
+    return http_build(http_json_response(200, body));
 }
 
 fn http_not_found() -> str {
-    return "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found";
+    return http_build(http_text_response(404, "Not Found"));
 }
 
 fn http_bad_request(msg: str) -> str {
-    return format("HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", msg);
+    return http_build(http_text_response(400, msg));
 }
 
 fn http_error(msg: str) -> str {
-    return format("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", msg);
+    return http_build(http_text_response(500, msg));
 }
 
 fn http_created(body: str) -> str {
-    return format("HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", body);
+    return http_build(http_text_response(201, body));
 }
 
 fn http_json_created(body: str) -> str {
-    return format("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n%s", body);
+    return http_build(http_json_response(201, body));
 }
 
 fn http_no_content() -> str {
-    return "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+    return http_build(http_text_response(204, ""));
 }
 
 fn http_unauthorized(msg: str) -> str {
-    return format("HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", msg);
+    return http_build(http_text_response(401, msg));
 }
 
 fn http_forbidden(msg: str) -> str {
-    return format("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", msg);
+    return http_build(http_text_response(403, msg));
 }
 
 fn http_unprocessable(msg: str) -> str {
-    return format("HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", msg);
+    return http_build(http_text_response(422, msg));
 }
