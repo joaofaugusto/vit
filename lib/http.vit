@@ -15,6 +15,7 @@ struct Request {
     path: str,
     body: str,
     headers: map[str, str],
+    params: map[str, str],
 }
 
 struct Response {
@@ -104,11 +105,13 @@ fn http_parse(buf: str) -> Request {
         body = substr(buf, headers_end + 4, 1048576);
     }
 
+    let params: map[str, str];
     let req: Request = Request {
         method: method,
         path: path,
         body: body,
-        headers: headers
+        headers: headers,
+        params: params
     };
     return req;
 }
@@ -199,6 +202,98 @@ fn query_get(req: Request, key: str) -> str {
 
 fn query_has(req: Request, key: str) -> i32 {
     return form_has(query_str(req), key);
+}
+
+fn http_param(req: Request, key: str) -> str {
+    if map_has(req.params, key) {
+        return map_get(req.params, key);
+    }
+    return "";
+}
+
+fn http_route_matches(req: Request, route: str) -> i32 {
+    let clean: str = http_path_clean(req);
+
+    if strcmp(clean, route) == 0 {
+        return 1;
+    }
+
+    let route_len: i32 = len(route);
+    if route_len > 0 {
+        let last: str = substr(route, route_len - 1, 1);
+        if strcmp(last, "/") == 0 {
+            if str_pos(clean, route) == 0 {
+                return 1;
+            }
+        }
+    }
+
+    if str_pos(route, ":") < 0 {
+        return 0;
+    }
+
+    let path_parts: [str; 64];
+    let route_parts: [str; 64];
+    let path_n: i32 = split(clean, "/", path_parts);
+    let route_n: i32 = split(route, "/", route_parts);
+
+    if path_n != route_n {
+        return 0;
+    }
+
+    for i in 0..route_n {
+        let rseg: str = route_parts[i];
+        if len(rseg) > 0 {
+            let first: str = substr(rseg, 0, 1);
+            if strcmp(first, ":") == 0 {
+                continue;
+            }
+        }
+
+        if strcmp(path_parts[i], rseg) != 0 {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+fn http_route_apply(req: Request, route: str) -> Request {
+    if http_route_matches(req, route) == 0 {
+        return req;
+    }
+
+    if str_pos(route, ":") < 0 {
+        return req;
+    }
+
+    let clean: str = http_path_clean(req);
+    let path_parts: [str; 64];
+    let route_parts: [str; 64];
+    let path_n: i32 = split(clean, "/", path_parts);
+    let route_n: i32 = split(route, "/", route_parts);
+    let params: map[str, str];
+
+    if path_n == route_n {
+        for i in 0..route_n {
+            let rseg: str = route_parts[i];
+            if len(rseg) > 1 {
+                let first: str = substr(rseg, 0, 1);
+                if strcmp(first, ":") == 0 {
+                    let key: str = substr(rseg, 1, len(rseg) - 1);
+                    map_set(params, key, path_parts[i]);
+                }
+            }
+        }
+    }
+
+    return Request {
+        method: req.method,
+        path: req.path,
+        body: req.body,
+        headers: req.headers,
+        params: params
+    };
 }
 
 fn http_reason_phrase(status: i32) -> str {

@@ -860,6 +860,7 @@ struct Request {
     path:    str,
     body:    str,
     headers: map[str, str],
+    params:  map[str, str],
 }
 
 struct Response {
@@ -879,6 +880,8 @@ struct Response {
 | `http_read_max(fd, max_bytes)` | Lê request HTTP com limite explícito |
 | `http_is(req, method, path)` | Match exato de método + path (ignora query string) |
 | `http_starts_with(req, method, prefix)` | Match de prefixo (rotas dinâmicas) |
+| `http_route_matches(req, route)` | Match de rota com suporte a `:params` |
+| `http_route_apply(req, route)` | Preenche `req.params` para rotas com `:params` |
 | `http_path_clean(req)` | Path sem query string |
 | `http_header(req, name)` | Valor de header ou `""` |
 | `http_method(req)` | Método HTTP |
@@ -894,6 +897,7 @@ struct Response {
 | `query_get(req, key)` | Extrai valor da query string (`?key=val`) |
 | `query_has(req, key)` | `1` se a chave existe na query string |
 | `query_str(req)` | Query string bruta |
+| `http_param(req, key)` | Extrai valor de parâmetro de rota (`:id`) |
 
 #### Respostas
 
@@ -931,18 +935,23 @@ fn handle_hello(req: Request) -> str {
     return http_json(format("{\"hello\":\"%s\"}", name));
 }
 
-fn handle_created(req: Request) -> str {
-    let resp: Response = http_with_header(
+fn handle_created(req: Request) -> Response {
+    return http_with_header(
         http_json_response(201, "{\"ok\":true}"),
         "X-Powered-By",
         "Vit"
     );
-    return http_build(resp);
+}
+
+fn handle_item(req: Request) -> str {
+    let id: str = http_param(req, "id");
+    return http_json(format("{\"id\":\"%s\"}", id));
 }
 
 fn main() -> i32 {
     http_handle("GET", "/hello", handle_hello);
     http_handle("POST", "/items", handle_created);
+    http_handle("GET", "/items/:id", handle_item);
     http_listen(8080);
     return 0;
 }

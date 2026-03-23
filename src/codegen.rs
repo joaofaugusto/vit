@@ -2092,6 +2092,72 @@ impl<'ctx> Codegen<'ctx> {
         gh.set_initializer(&arr64.const_zero());
     }
 
+    fn ensure_http_handler_wrapper(&mut self, handler_name: &str) -> Result<PointerValue<'ctx>, String> {
+        let i8_ptr = self.context.i8_type().ptr_type(AddressSpace::default());
+        let wrapper_name = format!("__vit_http_wrap_{}", handler_name);
+        let saved_bb = self.builder.get_insert_block();
+
+        if let Some(existing) = self.module.get_function(&wrapper_name) {
+            return Ok(existing.as_global_value().as_pointer_value());
+        }
+
+        let handler_fn = self.module.get_function(handler_name)
+            .ok_or_else(|| format!("http_handle(): unknown function '{}'", handler_name))?;
+        let ret = handler_fn.get_type().get_return_type()
+            .ok_or_else(|| format!("http_handle(): handler '{}' must return str or Response", handler_name))?;
+
+        match ret {
+            BasicTypeEnum::PointerType(_) => {
+                Ok(handler_fn.as_global_value().as_pointer_value())
+            }
+            BasicTypeEnum::StructType(ret_struct) => {
+                let (response_type, _) = self.struct_defs.get("Response")
+                    .ok_or_else(|| "http_handle(): Response struct not found — did you import lib/http.vit?".to_string())?
+                    .clone();
+                if ret_struct != response_type {
+                    return Err(format!(
+                        "http_handle(): handler '{}' must return str or Response",
+                        handler_name
+                    ));
+                }
+
+                let http_build_fn = self.module.get_function("http_build")
+                    .ok_or_else(|| "http_handle(): http_build not found — did you import lib/http.vit?".to_string())?;
+                let wrapper = self.module.add_function(
+                    &wrapper_name,
+                    i8_ptr.fn_type(&[i8_ptr.into()], false),
+                    None,
+                );
+                let entry = self.context.append_basic_block(wrapper, "entry");
+                self.builder.position_at_end(entry);
+
+                let req_ptr = wrapper.get_nth_param(0).unwrap().into_pointer_value();
+                let resp = self.builder
+                    .build_call(handler_fn, &[req_ptr.into()], "handler_resp")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| format!("http_handle(): handler '{}' returned no value", handler_name))?;
+                let built = self.builder
+                    .build_call(http_build_fn, &[resp.into()], "built_resp")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| "http_handle(): http_build returned no value".to_string())?;
+                self.builder.build_return(Some(&built)).unwrap();
+                if let Some(bb) = saved_bb {
+                    self.builder.position_at_end(bb);
+                }
+
+                Ok(wrapper.as_global_value().as_pointer_value())
+            }
+            _ => Err(format!(
+                "http_handle(): handler '{}' must return str or Response",
+                handler_name
+            )),
+        }
+    }
+
     fn generate(&mut self, program: &Program) -> Result<(), String> {
         self.register_strbuf_type();         // must come before generate_struct_defs
         self.generate_struct_defs(&program.structs);
@@ -3301,9 +3367,7 @@ impl<'ctx> Codegen<'ctx> {
                 Expression::Identifier(n) => n.clone(),
                 _ => return Err("http_handle(): third argument must be a function name".to_string()),
             };
-            let handler_fn = self.module.get_function(&handler_name)
-                .ok_or_else(|| format!("http_handle(): unknown function '{}'", handler_name))?;
-            let handler_ptr = handler_fn.as_global_value().as_pointer_value();
+            let handler_ptr = self.ensure_http_handler_wrapper(&handler_name)?;
 
             let count_g   = self.module.get_global("__vit_route_count").unwrap().as_pointer_value();
             let methods_g = self.module.get_global("__vit_route_methods").unwrap().as_pointer_value();
@@ -3327,7 +3391,6 @@ impl<'ctx> Codegen<'ctx> {
 
             return Ok(i32_type.const_int(0, false).into());
         }
-
         // http_listen(port)
         // Starts the accept loop and dispatches requests using the registered route table.
         if name == "http_listen" {
@@ -3338,7 +3401,6 @@ impl<'ctx> Codegen<'ctx> {
             let port_val = self.generate_expression(&arguments[0])?.into_int_value();
 
             let i32_type = self.context.i32_type();
-            let i64_type = self.context.i64_type();
             let i8_type  = self.context.i8_type();
             let i8_ptr   = i8_type.ptr_type(AddressSpace::default());
             let arr64    = i8_ptr.array_type(64);
@@ -3347,18 +3409,21 @@ impl<'ctx> Codegen<'ctx> {
             let tcp_accept_fn = self.module.get_function("__vit_tcp_accept").unwrap();
             let tcp_close_fn  = self.module.get_function("__vit_tcp_close").unwrap();
             let strcmp_fn     = self.module.get_function("strcmp").unwrap();
-            let strlen_fn     = self.module.get_function("strlen").unwrap();
             let http_read_fn = self.module.get_function("http_read")
-                .ok_or_else(|| "http_listen(): http_read not found — did you import lib/http.vit?".to_string())?;
+                .ok_or_else(|| "http_listen(): http_read not found - did you import lib/http.vit?".to_string())?;
             let http_send_fn = self.module.get_function("http_send")
-                .ok_or_else(|| "http_listen(): http_send not found — did you import lib/http.vit?".to_string())?;
+                .ok_or_else(|| "http_listen(): http_send not found - did you import lib/http.vit?".to_string())?;
             let http_not_found_fn = self.module.get_function("http_not_found")
-                .ok_or_else(|| "http_listen(): http_not_found not found — did you import lib/http.vit?".to_string())?;
+                .ok_or_else(|| "http_listen(): http_not_found not found - did you import lib/http.vit?".to_string())?;
+            let http_route_matches_fn = self.module.get_function("http_route_matches")
+                .ok_or_else(|| "http_listen(): http_route_matches not found - did you import lib/http.vit?".to_string())?;
+            let http_route_apply_fn = self.module.get_function("http_route_apply")
+                .ok_or_else(|| "http_listen(): http_route_apply not found - did you import lib/http.vit?".to_string())?;
             let http_parse_fn = self.module.get_function("http_parse")
-                .ok_or_else(|| "http_listen(): http_parse not found — did you import lib/http.vit?".to_string())?;
+                .ok_or_else(|| "http_listen(): http_parse not found - did you import lib/http.vit?".to_string())?;
 
             let (req_st_type, req_fields) = self.struct_defs.get("Request").cloned()
-                .ok_or_else(|| "http_listen(): Request struct not found — did you import lib/http.vit?".to_string())?;
+                .ok_or_else(|| "http_listen(): Request struct not found - did you import lib/http.vit?".to_string())?;
 
             let count_g    = self.module.get_global("__vit_route_count").unwrap().as_pointer_value();
             let methods_g  = self.module.get_global("__vit_route_methods").unwrap().as_pointer_value();
@@ -3366,7 +3431,6 @@ impl<'ctx> Codegen<'ctx> {
             let handlers_g = self.module.get_global("__vit_route_handlers").unwrap().as_pointer_value();
             let zero32     = i32_type.const_int(0, false);
 
-            // server_fd = tcp_listen(port)
             let server_fd = self.builder
                 .build_call(tcp_listen_fn, &[port_val.into()], "srv_fd")
                 .unwrap().try_as_basic_value().left().unwrap().into_int_value();
@@ -3378,17 +3442,14 @@ impl<'ctx> Codegen<'ctx> {
             let dispatch_check_bb  = self.context.append_basic_block(current_fn, "dispatch_check");
             let dispatch_body_bb   = self.context.append_basic_block(current_fn, "dispatch_body");
             let check_path_bb      = self.context.append_basic_block(current_fn, "check_path");
-            let check_prefix_bb    = self.context.append_basic_block(current_fn, "check_prefix");
-            let try_prefix_bb      = self.context.append_basic_block(current_fn, "try_prefix");
             let dispatch_match_bb  = self.context.append_basic_block(current_fn, "dispatch_match");
             let dispatch_next_bb   = self.context.append_basic_block(current_fn, "dispatch_next");
             let dispatch_done_bb   = self.context.append_basic_block(current_fn, "dispatch_done");
-            let send_bb           = self.context.append_basic_block(current_fn, "http_send");
-            let after_bb          = self.context.append_basic_block(current_fn, "http_after");
+            let send_bb            = self.context.append_basic_block(current_fn, "http_send");
+            let after_bb           = self.context.append_basic_block(current_fn, "http_after");
 
             self.builder.build_unconditional_branch(accept_bb).unwrap();
 
-            // ── accept_bb: accept → recv → parse ───────────────────────────────
             self.builder.position_at_end(accept_bb);
             let srv = self.builder.build_load(i32_type, srv_slot, "srv").unwrap().into_int_value();
             let client_fd = self.builder
@@ -3407,25 +3468,20 @@ impl<'ctx> Codegen<'ctx> {
             let req_slot = self.builder.build_alloca(req_st_type, "req_slot").unwrap();
             self.builder.build_store(req_slot, req_val.into_struct_value()).unwrap();
 
-            // i = 0; resp_slot = null
             let i_slot    = self.builder.build_alloca(i32_type, "i_slot").unwrap();
-            let resp_slot = self.builder.build_alloca(i8_ptr,   "resp_slot").unwrap();
+            let resp_slot = self.builder.build_alloca(i8_ptr, "resp_slot").unwrap();
             self.builder.build_store(i_slot, zero32).unwrap();
             self.builder.build_store(resp_slot, i8_ptr.const_null()).unwrap();
             self.builder.build_unconditional_branch(dispatch_check_bb).unwrap();
 
-            // ── dispatch_check_bb: if i >= count → done ────────────────────────
             self.builder.position_at_end(dispatch_check_bb);
             let i   = self.builder.build_load(i32_type, i_slot, "i").unwrap().into_int_value();
             let cnt = self.builder.build_load(i32_type, count_g, "cnt").unwrap().into_int_value();
             let exhausted = self.builder.build_int_compare(IntPredicate::SGE, i, cnt, "exh").unwrap();
             self.builder.build_conditional_branch(exhausted, dispatch_done_bb, dispatch_body_bb).unwrap();
 
-            // ── dispatch_body_bb: strcmp(req.method, methods[i]) ──────────────
             self.builder.position_at_end(dispatch_body_bb);
             let i2 = self.builder.build_load(i32_type, i_slot, "i2").unwrap().into_int_value();
-
-            // req.method = req_slot->method (field index 0)
             let method_idx = req_fields.iter().position(|f| f == "method").unwrap_or(0) as u32;
             let method_gep = self.builder
                 .build_struct_gep(req_st_type, req_slot, method_idx, "req_method_ptr").unwrap();
@@ -3440,65 +3496,26 @@ impl<'ctx> Codegen<'ctx> {
             let meq = self.builder.build_int_compare(IntPredicate::EQ, mcmp, zero32, "meq").unwrap();
             self.builder.build_conditional_branch(meq, check_path_bb, dispatch_next_bb).unwrap();
 
-            // ── check_path_bb: exact strcmp first, then fall through to prefix ──
             self.builder.position_at_end(check_path_bb);
             let i3 = self.builder.build_load(i32_type, i_slot, "i3").unwrap().into_int_value();
-
-            let path_idx = req_fields.iter().position(|f| f == "path").unwrap_or(1) as u32;
-            let path_gep = self.builder
-                .build_struct_gep(req_st_type, req_slot, path_idx, "req_path_ptr").unwrap();
-            let req_path = self.builder.build_load(i8_ptr, path_gep, "req_path").unwrap().into_pointer_value();
-
             let pptr = unsafe { self.builder.build_gep(arr64, paths_g, &[zero32, i3], "pptr") }.unwrap();
             let route_path = self.builder.build_load(i8_ptr, pptr, "rp").unwrap().into_pointer_value();
 
-            let pcmp = self.builder
-                .build_call(strcmp_fn, &[req_path.into(), route_path.into()], "pcmp")
+            let route_match = self.builder
+                .build_call(http_route_matches_fn, &[req_slot.into(), route_path.into()], "route_match")
                 .unwrap().try_as_basic_value().left().unwrap().into_int_value();
-            let peq = self.builder.build_int_compare(IntPredicate::EQ, pcmp, zero32, "peq").unwrap();
-            // Exact match → dispatch; no match → try prefix
-            self.builder.build_conditional_branch(peq, dispatch_match_bb, check_prefix_bb).unwrap();
+            let route_applied = self.builder
+                .build_call(http_route_apply_fn, &[req_slot.into(), route_path.into()], "route_applied")
+                .unwrap().try_as_basic_value().left().unwrap();
+            self.builder.build_store(req_slot, route_applied.into_struct_value()).unwrap();
+            let matched = self.builder.build_int_compare(IntPredicate::NE, route_match, zero32, "matched").unwrap();
+            self.builder.build_conditional_branch(matched, dispatch_match_bb, dispatch_next_bb).unwrap();
 
-            // ── check_prefix_bb: if route ends with '/', try strncmp prefix ────
-            self.builder.position_at_end(check_prefix_bb);
-            let plen64 = self.builder
-                .build_call(strlen_fn, &[route_path.into()], "plen64")
-                .unwrap().try_as_basic_value().left().unwrap().into_int_value();
-            let zero64 = i64_type.const_int(0, false);
-            let plen_zero = self.builder.build_int_compare(IntPredicate::EQ, plen64, zero64, "plen_zero").unwrap();
-            // if plen == 0: skip to next route
-            self.builder.build_conditional_branch(plen_zero, dispatch_next_bb, try_prefix_bb).unwrap();
-
-            // ── try_prefix_bb: last char == '/' && strncmp matches ────────────
-            self.builder.position_at_end(try_prefix_bb);
-            let one64   = i64_type.const_int(1, false);
-            let last_off = self.builder.build_int_sub(plen64, one64, "last_off").unwrap();
-            let last_ptr = unsafe {
-                self.builder.build_gep(i8_type, route_path, &[last_off], "last_ptr")
-            }.unwrap();
-            let last_char = self.builder
-                .build_load(i8_type, last_ptr, "last_char").unwrap().into_int_value();
-            let slash_char = i8_type.const_int('/' as u64, false);
-            let is_slash = self.builder
-                .build_int_compare(IntPredicate::EQ, last_char, slash_char, "is_slash").unwrap();
-
-            // Compute strncmp(req_path, route_path, plen) only if last char is '/'
-            let strncmp_fn = self.module.get_function("strncmp").unwrap();
-            // We always call strncmp; the branch below gates the result
-            let ncmp = self.builder
-                .build_call(strncmp_fn, &[req_path.into(), route_path.into(), plen64.into()], "ncmp")
-                .unwrap().try_as_basic_value().left().unwrap().into_int_value();
-            let ncmp_eq = self.builder.build_int_compare(IntPredicate::EQ, ncmp, zero32, "ncmp_eq").unwrap();
-            let prefix_match = self.builder.build_and(is_slash, ncmp_eq, "prefix_match").unwrap();
-            self.builder.build_conditional_branch(prefix_match, dispatch_match_bb, dispatch_next_bb).unwrap();
-
-            // ── dispatch_match_bb: call handler(req_slot) via function pointer ─
             self.builder.position_at_end(dispatch_match_bb);
             let i4 = self.builder.build_load(i32_type, i_slot, "i4").unwrap().into_int_value();
             let hptr = unsafe { self.builder.build_gep(arr64, handlers_g, &[zero32, i4], "hptr") }.unwrap();
             let handler_ptr_val = self.builder.build_load(i8_ptr, hptr, "hfn").unwrap().into_pointer_value();
 
-            // handler type: ptr (ptr)  — fn(req: *Request) -> str
             let handler_fn_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
             let resp = self.builder
                 .build_indirect_call(handler_fn_type, handler_ptr_val, &[req_slot.into()], "resp")
@@ -3506,14 +3523,12 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_store(resp_slot, resp).unwrap();
             self.builder.build_unconditional_branch(dispatch_done_bb).unwrap();
 
-            // ── dispatch_next_bb: i++ ──────────────────────────────────────────
             self.builder.position_at_end(dispatch_next_bb);
             let i5  = self.builder.build_load(i32_type, i_slot, "i5").unwrap().into_int_value();
             let i5p = self.builder.build_int_add(i5, i32_type.const_int(1, false), "i5p").unwrap();
             self.builder.build_store(i_slot, i5p).unwrap();
             self.builder.build_unconditional_branch(dispatch_check_bb).unwrap();
 
-            // ── dispatch_done_bb: if resp == null → 404 ───────────────────────
             self.builder.position_at_end(dispatch_done_bb);
             let resp_val = self.builder.build_load(i8_ptr, resp_slot, "respv").unwrap().into_pointer_value();
             let is_null  = self.builder.build_is_null(resp_val, "isnull").unwrap();
@@ -3523,11 +3538,9 @@ impl<'ctx> Codegen<'ctx> {
             let final_resp = self.builder
                 .build_select(is_null, not_found_str, resp_val, "final_resp").unwrap()
                 .into_pointer_value();
-            // Store into resp_slot so send_bb can load it
             self.builder.build_store(resp_slot, final_resp).unwrap();
             self.builder.build_unconditional_branch(send_bb).unwrap();
 
-            // ── send_bb: write response → close → loop ─────────────────────────
             self.builder.position_at_end(send_bb);
             let final_resp2 = self.builder.build_load(i8_ptr, resp_slot, "final_resp2").unwrap().into_pointer_value();
             let cli  = self.builder.build_load(i32_type, cli_slot, "cli2").unwrap().into_int_value();
@@ -3535,7 +3548,6 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_call(tcp_close_fn, &[cli.into()], "closed").unwrap();
             self.builder.build_unconditional_branch(accept_bb).unwrap();
 
-            // after_bb: dead code, required for statements after http_listen()
             self.builder.position_at_end(after_bb);
             return Ok(i32_type.const_int(0, false).into());
         }
