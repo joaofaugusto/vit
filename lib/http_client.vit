@@ -1,0 +1,67 @@
+// lib/http_client.vit — HTTP client for Vit (powered by libcurl)
+//
+// Usage: import "lib/http_client.vit";
+//
+// Requires: sudo apt install libcurl4-openssl-dev
+//
+// The compiler auto-compiles and links http_client_shim.c.
+// Call http_client_free(res) after each request in long-running servers
+// to avoid memory leaks (each response is heap-allocated by the shim).
+
+link "http_client_shim.c";
+link "-lcurl";
+
+// ── raw extern bindings ───────────────────────────────────────────────────────
+
+extern fn vit_http_get(url: str) -> str;
+extern fn vit_http_post(url: str, body: str) -> str;
+extern fn vit_http_post_json(url: str, body: str) -> str;
+extern fn vit_http_put_json(url: str, body: str) -> str;
+extern fn vit_http_patch_json(url: str, body: str) -> str;
+extern fn vit_http_delete(url: str) -> str;
+extern fn vit_http_client_status() -> i32;
+extern fn vit_http_client_free(ptr: str) -> i32;
+
+// ── high-level wrappers ───────────────────────────────────────────────────────
+
+// GET — returns response body.
+// Check http_client_status() for the HTTP status code.
+fn http_get(url: str) -> str {
+    return vit_http_get(url);
+}
+
+// POST with application/x-www-form-urlencoded body (form data).
+fn http_post(url: str, body: str) -> str {
+    return vit_http_post(url, body);
+}
+
+// POST with application/json body.
+fn http_post_json(url: str, body: str) -> str {
+    return vit_http_post_json(url, body);
+}
+
+// PUT with application/json body.
+fn http_put_json(url: str, body: str) -> str {
+    return vit_http_put_json(url, body);
+}
+
+// PATCH with application/json body.
+fn http_patch_json(url: str, body: str) -> str {
+    return vit_http_patch_json(url, body);
+}
+
+// DELETE — returns response body.
+fn http_delete(url: str) -> str {
+    return vit_http_delete(url);
+}
+
+// Returns the HTTP status code of the last request (e.g. 200, 404, 500).
+fn http_client_status() -> i32 {
+    return vit_http_client_status();
+}
+
+// Frees the response body allocated by the shim.
+// Call this after processing each response in long-running servers.
+fn http_client_free(res: str) -> i32 {
+    return vit_http_client_free(res);
+}
