@@ -127,6 +127,13 @@ fn json_bool_ok(value: i32) -> JsonBoolResult {
     };
 }
 
+fn json_is_null(j: str) -> i32  { return vit_json_is_null(j); }
+fn json_is_str(j: str) -> i32   { return vit_json_is_str(j); }
+fn json_is_int(j: str) -> i32   { return vit_json_is_int(j); }
+fn json_is_bool(j: str) -> i32  { return vit_json_is_bool(j); }
+fn json_is_obj(j: str) -> i32   { return vit_json_is_obj(j); }
+fn json_is_arr(j: str) -> i32   { return vit_json_is_arr(j); }
+
 // Parses a JSON string. Returns an opaque handle.
 // Always call json_free(j) when done to release memory.
 // Returns "" on parse error.
@@ -263,13 +270,6 @@ fn json_arr_get_str(j: str, i: i32) -> str {
 fn json_arr_get_int(j: str, i: i32) -> i32 {
     return vit_json_arr_get_int(j, i);
 }
-
-fn json_is_null(j: str) -> i32  { return vit_json_is_null(j); }
-fn json_is_str(j: str) -> i32   { return vit_json_is_str(j); }
-fn json_is_int(j: str) -> i32   { return vit_json_is_int(j); }
-fn json_is_bool(j: str) -> i32  { return vit_json_is_bool(j); }
-fn json_is_obj(j: str) -> i32   { return vit_json_is_obj(j); }
-fn json_is_arr(j: str) -> i32   { return vit_json_is_arr(j); }
 
 // Serializes any JSON handle back to a string (unformatted).
 // The returned str is heap-allocated; call json_str_free() when done.
