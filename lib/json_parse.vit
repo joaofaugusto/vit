@@ -156,11 +156,7 @@ fn json_valid(j: str) -> i32 {
 // Call json_free(res.json) when res.ok != 0 and you are done with it.
 fn json_parse_result(s: str) -> JsonParseResult {
     let j: str = json_parse(s);
-    if strcmp(j, "") == 0 {
-        return json_parse_error("Invalid JSON body");
-    }
     if json_valid(j) == 0 {
-        json_free(j);
         return json_parse_error("Invalid JSON body");
     }
     return json_parse_ok(j);
