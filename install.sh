@@ -50,6 +50,20 @@ pkg_installed() {
 }
 
 if command -v apt-get &>/dev/null; then
+    # LLVM 18 pode não estar no repo padrão em Ubuntu 20.04/22.04.
+    # Se não estiver disponível, adiciona o repo oficial do LLVM antes de instalar.
+    if ! pkg_installed llvm-18-dev; then
+        if ! apt-cache show llvm-18-dev &>/dev/null 2>&1; then
+            info "LLVM 18 não encontrado no repo padrão. Adicionando repositório oficial..."
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+            . /etc/os-release
+            echo "deb http://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-18 main" \
+                | sudo tee /etc/apt/sources.list.d/llvm-18.list
+            sudo apt-get update -qq
+        fi
+        APT_PKGS+=(llvm-18-dev)
+    fi
+    pkg_installed libpolly-18-dev      || APT_PKGS+=(libpolly-18-dev)
     pkg_installed libsqlite3-dev       || APT_PKGS+=(libsqlite3-dev)
     pkg_installed libcurl4-openssl-dev || APT_PKGS+=(libcurl4-openssl-dev)
     pkg_installed libpq-dev            || APT_PKGS+=(libpq-dev)
