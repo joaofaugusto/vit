@@ -2511,15 +2511,21 @@ impl<'ctx> Codegen<'ctx> {
                     self.array_params.insert(param.name.clone(), elem_type);
                 }
                 Type::Struct(sname) => {
-                    // Struct param: incoming value is a pointer to the struct — copy into local alloca
                     let (st, _) = self.struct_defs.get(sname)
                         .unwrap_or_else(|| panic!("Unknown struct '{}'", sname))
                         .clone();
-                    let alloca = self.builder.build_alloca(st, &param.name).unwrap();
                     let src_ptr = param_value.into_pointer_value();
-                    let struct_val = self.builder.build_load(st, src_ptr, "param_struct").unwrap();
-                    self.builder.build_store(alloca, struct_val).unwrap();
-                    self.variables.insert(param.name.clone(), (alloca, st.into()));
+                    if sname == "StrBuf" {
+                        // StrBuf uses pointer semantics: mutations to len/data must be
+                        // visible in the caller. Store the caller's pointer directly.
+                        self.variables.insert(param.name.clone(), (src_ptr, st.into()));
+                    } else {
+                        // Other structs: copy into a local alloca (pass-by-value).
+                        let alloca = self.builder.build_alloca(st, &param.name).unwrap();
+                        let struct_val = self.builder.build_load(st, src_ptr, "param_struct").unwrap();
+                        self.builder.build_store(alloca, struct_val).unwrap();
+                        self.variables.insert(param.name.clone(), (alloca, st.into()));
+                    }
                     self.var_struct_names.insert(param.name.clone(), sname.clone());
                 }
                 Type::Map { key, value } => {
