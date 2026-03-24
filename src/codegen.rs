@@ -2551,27 +2551,33 @@ impl<'ctx> Codegen<'ctx> {
     fn generate_statement(&mut self, stmt: &Statement) -> Result<(), String> {
         match stmt {
             Statement::VariableDecl { name, typ, initializer } => {
-                // Map variables: calloc backing store, track key/val types
+                // Map variables: calloc backing store (no init) or copy pointer (with init)
                 if let Type::Map { key, value } = typ {
-                    let alloc_size = match (key.as_ref(), value.as_ref()) {
-                        (Type::I32, Type::I32) => 49152u64,  // CAP*4 + CAP*4 + CAP*4
-                        (Type::Str, Type::I32) => 65536u64,  // CAP*8 + CAP*4 + CAP*4
-                        (Type::I32, Type::I64) => 65536u64,  // CAP*4 + CAP*8 + CAP*4
-                        (Type::I64, Type::I32) => 65536u64,  // CAP*8 + CAP*4 + CAP*4
-                        (Type::I64, Type::I64) => 81920u64,  // CAP*8 + CAP*8 + CAP*4
-                        (Type::Str, Type::Str) => 81920u64,  // CAP*8 + CAP*8 + CAP*4
-                        _ => return Err(format!("Unsupported map type: map[{}, {}]", key, value)),
-                    };
-                    let i8_ptr    = self.context.i8_type().ptr_type(AddressSpace::default());
-                    let alloca    = self.builder.build_alloca(i8_ptr, name).unwrap();
-                    let calloc_fn = self.module.get_function("calloc").unwrap();
-                    let i64_type  = self.context.i64_type();
-                    let map_mem   = self.builder.build_call(
-                        calloc_fn,
-                        &[i64_type.const_int(1, false).into(), i64_type.const_int(alloc_size, false).into()],
-                        "map_alloc",
-                    ).unwrap().try_as_basic_value().left().unwrap();
-                    self.builder.build_store(alloca, map_mem).unwrap();
+                    let i8_ptr = self.context.i8_type().ptr_type(AddressSpace::default());
+                    let alloca = self.builder.build_alloca(i8_ptr, name).unwrap();
+                    if let Some(init) = initializer {
+                        // Alias: copy the map pointer from the initializer expression
+                        let map_ptr = self.generate_expression(init)?.into_pointer_value();
+                        self.builder.build_store(alloca, map_ptr).unwrap();
+                    } else {
+                        let alloc_size = match (key.as_ref(), value.as_ref()) {
+                            (Type::I32, Type::I32) => 49152u64,
+                            (Type::Str, Type::I32) => 65536u64,
+                            (Type::I32, Type::I64) => 65536u64,
+                            (Type::I64, Type::I32) => 65536u64,
+                            (Type::I64, Type::I64) => 81920u64,
+                            (Type::Str, Type::Str) => 81920u64,
+                            _ => return Err(format!("Unsupported map type: map[{}, {}]", key, value)),
+                        };
+                        let calloc_fn = self.module.get_function("calloc").unwrap();
+                        let i64_type  = self.context.i64_type();
+                        let map_mem   = self.builder.build_call(
+                            calloc_fn,
+                            &[i64_type.const_int(1, false).into(), i64_type.const_int(alloc_size, false).into()],
+                            "map_alloc",
+                        ).unwrap().try_as_basic_value().left().unwrap();
+                        self.builder.build_store(alloca, map_mem).unwrap();
+                    }
                     self.variables.insert(name.clone(), (alloca, i8_ptr.into()));
                     self.map_variables.insert(name.clone(), (*key.clone(), *value.clone()));
                     return Ok(());
