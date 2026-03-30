@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -41,12 +42,21 @@ char* vit_http_read_request(int fd, int max_bytes) {
         return empty;
     }
 
+    struct timeval tv;
+    tv.tv_sec = 30;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     int cap = 4096;
     if (cap > max_bytes + 1) cap = max_bytes + 1;
     if (cap < 64) cap = max_bytes + 1;
 
     char* buf = (char*)malloc((size_t)cap);
-    if (!buf) return NULL;
+    if (!buf) {
+        char* empty = (char*)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
 
     int len = 0;
     int headers_end = -1;

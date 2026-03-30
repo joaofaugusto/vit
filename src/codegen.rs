@@ -3808,6 +3808,16 @@ impl<'ctx> Codegen<'ctx> {
                 .build_call(tcp_accept_fn, &[srv.into()], "cli")
                 .unwrap().try_as_basic_value().left().unwrap().into_int_value();
             self.builder.build_store(cli_slot, client_fd).unwrap();
+            let accept_ok_bb = self.context.append_basic_block(current_fn, "accept_ok");
+            let accept_failed = self.builder.build_int_compare(
+                IntPredicate::SLT,
+                client_fd,
+                i32_type.const_zero(),
+                "accept_failed"
+            ).unwrap();
+            self.builder.build_conditional_branch(accept_failed, accept_bb, accept_ok_bb).unwrap();
+
+            self.builder.position_at_end(accept_ok_bb);
             if use_fork {
                 let pid = self.builder
                     .build_call(fork_fn, &[], "pid")
