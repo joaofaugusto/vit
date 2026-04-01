@@ -213,8 +213,29 @@ impl Parser {
                 let key = Box::new(self.parse_type()?);
                 self.expect(TokenType::Comma)?;
                 let value = Box::new(self.parse_type()?);
+                // Optional capacity hint: map[K, V; N]
+                let cap = if matches!(self.current().typ, TokenType::Semicolon) {
+                    self.advance(); // consume ';'
+                    let n = match &self.current().typ {
+                        TokenType::IntLiteral(n) => *n as usize,
+                        _ => return Err(format!(
+                            "Expected integer capacity after ';' in map type, got {:?} at {}:{}",
+                            self.current().typ, self.current().line, self.current().column
+                        )),
+                    };
+                    if n == 0 || (n & (n - 1)) != 0 {
+                        return Err(format!(
+                            "Map capacity must be a power of 2, got {} at {}:{}",
+                            n, self.current().line, self.current().column
+                        ));
+                    }
+                    self.advance(); // consume the integer literal
+                    Some(n)
+                } else {
+                    None
+                };
                 self.expect(TokenType::RBracket)?;
-                Ok(Type::Map { key, value })
+                Ok(Type::Map { key, value, cap })
             }
             TokenType::Identifier(s) => {
                 let name = s.clone();

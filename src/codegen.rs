@@ -19,9 +19,11 @@ pub struct Codegen<'ctx> {
     printf: Option<FunctionValue<'ctx>>,
     scanf: Option<FunctionValue<'ctx>>,
     loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
-    map_variables: HashMap<String, (Type, Type)>,
+    map_variables: HashMap<String, (Type, Type, usize)>,
     // Global map variables: need runtime calloc init + tracking across functions
-    global_map_variables: HashMap<String, (Type, Type)>,
+    global_map_variables: HashMap<String, (Type, Type, usize)>,
+    // Tracks which map helper sets (by capacity) have already been generated
+    generated_map_caps: std::collections::HashSet<u64>,
     // Element type for array parameters (passed as pointer to first element)
     array_params: HashMap<String, BasicTypeEnum<'ctx>>,
     // LLVM struct types keyed by struct name
@@ -49,6 +51,7 @@ impl<'ctx> Codegen<'ctx> {
             loop_stack: Vec::new(),
             map_variables: HashMap::new(),
             global_map_variables: HashMap::new(),
+            generated_map_caps: std::collections::HashSet::new(),
             array_params: HashMap::new(),
             struct_defs: HashMap::new(),
             struct_field_types: HashMap::new(),
@@ -771,18 +774,29 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.build_return(Some(&final_count)).unwrap();
     }
 
-    fn build_map_helpers(&mut self) {
+    fn ensure_map_helpers_for_cap(&mut self, cap: u64) {
+        if !self.generated_map_caps.contains(&cap) {
+            self.build_map_helpers(cap);
+        }
+    }
+
+    fn build_map_helpers(&mut self, cap: u64) {
+        if self.generated_map_caps.contains(&cap) {
+            return;
+        }
+        self.generated_map_caps.insert(cap);
+
         let i8_type  = self.context.i8_type();
         let i8_ptr   = i8_type.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
         let i64_type = self.context.i64_type();
         let void_type = self.context.void_type();
-        let cap       = 4096u64;
         let cap_i32   = i32_type.const_int(cap, false);
 
-        // ====== __vit_hash_str(i8* s) -> i32  (djb2, result & 4095) ======
+        // ====== __vit_hash_str_{cap}(i8* s) -> i32  (djb2, result & (cap-1)) ======
         {
-            let f = self.module.add_function("__vit_hash_str",
+            let fn_name = format!("__vit_hash_str_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 i32_type.fn_type(&[i8_ptr.into()], false), None);
             let entry   = self.context.append_basic_block(f, "entry");
             let cond_bb = self.context.append_basic_block(f, "cond");
@@ -823,13 +837,28 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_return(Some(&slot)).unwrap();
         }
 
-        // Helper macro-like closures can't be used easily, so I'll repeat the probe pattern per function.
-        // Layout for map[i32, i32]:  keys at i*4, vals at 16384+i*4, used at 32768+i*4  alloc=49152
-        // Layout for map[str, i32]:  keys at i*8, vals at 32768+i*4, used at 49152+i*4  alloc=65536
+        // Compute offsets dynamically from cap.
+        // key_size: i32=4, i64=8, str(ptr)=8
+        // val_offset_base = cap * key_size
+        // used_offset_base = cap * (key_size + val_size)
+        // alloc_size = cap * (key_size + val_size + 4)
+        let i32i32_val_off  = cap * 4;   // cap*4
+        let i32i32_used_off = cap * 8;   // cap*(4+4)
+        let stri32_val_off  = cap * 8;   // cap*8
+        let stri32_used_off = cap * 12;  // cap*(8+4)
+        let strstr_val_off  = cap * 8;   // cap*8
+        let strstr_used_off = cap * 16;  // cap*(8+8)
+        let i32i64_val_off  = cap * 4;   // cap*4
+        let i32i64_used_off = cap * 12;  // cap*(4+8)
+        let i64i32_val_off  = cap * 8;   // cap*8
+        let i64i32_used_off = cap * 12;  // cap*(8+4)
+        let i64i64_val_off  = cap * 8;   // cap*8
+        let i64i64_used_off = cap * 16;  // cap*(8+8)
 
-        // ====== __vit_map_i32i32_set(i8*, i32 key, i32 val) -> void ======
+        // ====== __vit_map_i32i32_set_{cap}(i8*, i32 key, i32 val) -> void ======
         {
-            let f = self.module.add_function("__vit_map_i32i32_set",
+            let fn_name = format!("__vit_map_i32i32_set_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 void_type.fn_type(&[i8_ptr.into(), i32_type.into(), i32_type.into()], false), None);
             let entry     = self.context.append_basic_block(f, "entry");
             let lp        = self.context.append_basic_block(f, "lp");
@@ -852,7 +881,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(32768, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(i32i32_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             let u   = self.builder.build_load(i32_type, up, "u").unwrap().into_int_value();
@@ -871,14 +900,14 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.position_at_end(ins);
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
-            let uo  = self.builder.build_int_add(i64_type.const_int(32768, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(i32i32_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             self.builder.build_store(up, i32_type.const_int(1, false)).unwrap();
             let ko  = self.builder.build_int_mul(i64, f4, "ko").unwrap();
             let kp  = unsafe { self.builder.build_gep(i8_type, map, &[ko], "kp") }.unwrap();
             self.builder.build_store(kp, key).unwrap();
-            let vo  = self.builder.build_int_add(i64_type.const_int(16384, false),
+            let vo  = self.builder.build_int_add(i64_type.const_int(i32i32_val_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "vo").unwrap();
             let vp  = unsafe { self.builder.build_gep(i8_type, map, &[vo], "vp") }.unwrap();
             self.builder.build_store(vp, val).unwrap();
@@ -892,9 +921,10 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_unconditional_branch(lp).unwrap();
         }
 
-        // ====== __vit_map_i32i32_get(i8*, i32 key) -> i32 ======
+        // ====== __vit_map_i32i32_get_{cap}(i8*, i32 key) -> i32 ======
         {
-            let f = self.module.add_function("__vit_map_i32i32_get",
+            let fn_name = format!("__vit_map_i32i32_get_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 i32_type.fn_type(&[i8_ptr.into(), i32_type.into()], false), None);
             let entry = self.context.append_basic_block(f, "entry");
             let lp    = self.context.append_basic_block(f, "lp");
@@ -917,7 +947,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(32768, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(i32i32_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             let u   = self.builder.build_load(i32_type, up, "u").unwrap().into_int_value();
@@ -936,7 +966,7 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.position_at_end(fnd);
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
-            let vo  = self.builder.build_int_add(i64_type.const_int(16384, false),
+            let vo  = self.builder.build_int_add(i64_type.const_int(i32i32_val_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "vo").unwrap();
             let vp  = unsafe { self.builder.build_gep(i8_type, map, &[vo], "vp") }.unwrap();
             let v   = self.builder.build_load(i32_type, vp, "v").unwrap();
@@ -953,9 +983,10 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_return(Some(&i32_type.const_int(0, false))).unwrap();
         }
 
-        // ====== __vit_map_i32i32_has(i8*, i32 key) -> i32 (1=found, 0=not) ======
+        // ====== __vit_map_i32i32_has_{cap}(i8*, i32 key) -> i32 (1=found, 0=not) ======
         {
-            let f = self.module.add_function("__vit_map_i32i32_has",
+            let fn_name = format!("__vit_map_i32i32_has_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 i32_type.fn_type(&[i8_ptr.into(), i32_type.into()], false), None);
             let entry = self.context.append_basic_block(f, "entry");
             let lp    = self.context.append_basic_block(f, "lp");
@@ -978,7 +1009,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(32768, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(i32i32_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             let u   = self.builder.build_load(i32_type, up, "u").unwrap().into_int_value();
@@ -1009,12 +1040,13 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         let strcmp   = self.module.get_function("strcmp").unwrap();
-        let hash_str = self.module.get_function("__vit_hash_str").unwrap();
+        let hash_str_name = format!("__vit_hash_str_{}", cap);
+        let hash_str = self.module.get_function(&hash_str_name).unwrap();
 
-        // ====== __vit_map_stri32_set(i8*, i8* key, i32 val) -> void ======
-        // keys[i] at i*8, vals at 32768+i*4, used at 49152+i*4
+        // ====== __vit_map_stri32_set_{cap}(i8*, i8* key, i32 val) -> void ======
         {
-            let f = self.module.add_function("__vit_map_stri32_set",
+            let fn_name = format!("__vit_map_stri32_set_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 void_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i32_type.into()], false), None);
             let entry = self.context.append_basic_block(f, "entry");
             let lp    = self.context.append_basic_block(f, "lp");
@@ -1036,7 +1068,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(49152, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(stri32_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             let u   = self.builder.build_load(i32_type, up, "u").unwrap().into_int_value();
@@ -1060,14 +1092,14 @@ impl<'ctx> Codegen<'ctx> {
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
             let f8  = i64_type.const_int(8, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(49152, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(stri32_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             self.builder.build_store(up, i32_type.const_int(1, false)).unwrap();
             let ko  = self.builder.build_int_mul(i64, f8, "ko").unwrap();
             let kp  = unsafe { self.builder.build_gep(i8_type, map, &[ko], "kp") }.unwrap();
             self.builder.build_store(kp, key).unwrap();
-            let vo  = self.builder.build_int_add(i64_type.const_int(32768, false),
+            let vo  = self.builder.build_int_add(i64_type.const_int(stri32_val_off, false),
                         self.builder.build_int_mul(i64, f4, "xv").unwrap(), "vo").unwrap();
             let vp  = unsafe { self.builder.build_gep(i8_type, map, &[vo], "vp") }.unwrap();
             self.builder.build_store(vp, val).unwrap();
@@ -1081,9 +1113,10 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_unconditional_branch(lp).unwrap();
         }
 
-        // ====== __vit_map_stri32_get(i8*, i8* key) -> i32 ======
+        // ====== __vit_map_stri32_get_{cap}(i8*, i8* key) -> i32 ======
         {
-            let f = self.module.add_function("__vit_map_stri32_get",
+            let fn_name = format!("__vit_map_stri32_get_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false), None);
             let entry = self.context.append_basic_block(f, "entry");
             let lp    = self.context.append_basic_block(f, "lp");
@@ -1105,7 +1138,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(49152, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(stri32_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             let u   = self.builder.build_load(i32_type, up, "u").unwrap().into_int_value();
@@ -1128,7 +1161,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let vo  = self.builder.build_int_add(i64_type.const_int(32768, false),
+            let vo  = self.builder.build_int_add(i64_type.const_int(stri32_val_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "vo").unwrap();
             let vp  = unsafe { self.builder.build_gep(i8_type, map, &[vo], "vp") }.unwrap();
             let v   = self.builder.build_load(i32_type, vp, "v").unwrap();
@@ -1145,9 +1178,10 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_return(Some(&i32_type.const_int(0, false))).unwrap();
         }
 
-        // ====== __vit_map_stri32_has(i8*, i8* key) -> i32 ======
+        // ====== __vit_map_stri32_has_{cap}(i8*, i8* key) -> i32 ======
         {
-            let f = self.module.add_function("__vit_map_stri32_has",
+            let fn_name = format!("__vit_map_stri32_has_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false), None);
             let entry = self.context.append_basic_block(f, "entry");
             let lp    = self.context.append_basic_block(f, "lp");
@@ -1169,7 +1203,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(49152, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(stri32_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             let u   = self.builder.build_load(i32_type, up, "u").unwrap().into_int_value();
@@ -1203,13 +1237,13 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         // ====================================================================
-        // map[str, str]: key_off=i*8, val_off=32768+i*8, used_off=65536+i*4
-        //                alloc = 4096*8 + 4096*8 + 4096*4 = 81920
+        // map[str, str]
         // ====================================================================
 
-        // ====== __vit_map_strstr_set(i8* map, i8* key, i8* val) -> void ======
+        // ====== __vit_map_strstr_set_{cap}(i8* map, i8* key, i8* val) -> void ======
         {
-            let f = self.module.add_function("__vit_map_strstr_set",
+            let fn_name = format!("__vit_map_strstr_set_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 void_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false), None);
             let entry = self.context.append_basic_block(f, "entry");
             let lp    = self.context.append_basic_block(f, "lp");
@@ -1231,7 +1265,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(65536, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(strstr_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             let u   = self.builder.build_load(i32_type, up, "u").unwrap().into_int_value();
@@ -1256,7 +1290,7 @@ impl<'ctx> Codegen<'ctx> {
             let f4  = i64_type.const_int(4, false);
             let f8  = i64_type.const_int(8, false);
             // mark used
-            let uo  = self.builder.build_int_add(i64_type.const_int(65536, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(strstr_used_off, false),
                         self.builder.build_int_mul(i64, f4, "xu").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             self.builder.build_store(up, i32_type.const_int(1, false)).unwrap();
@@ -1265,7 +1299,7 @@ impl<'ctx> Codegen<'ctx> {
             let kp  = unsafe { self.builder.build_gep(i8_type, map, &[ko], "kp") }.unwrap();
             self.builder.build_store(kp, key).unwrap();
             // store val
-            let vo  = self.builder.build_int_add(i64_type.const_int(32768, false),
+            let vo  = self.builder.build_int_add(i64_type.const_int(strstr_val_off, false),
                         self.builder.build_int_mul(i64, f8, "xv").unwrap(), "vo").unwrap();
             let vp  = unsafe { self.builder.build_gep(i8_type, map, &[vo], "vp") }.unwrap();
             self.builder.build_store(vp, val).unwrap();
@@ -1279,10 +1313,11 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_unconditional_branch(lp).unwrap();
         }
 
-        // ====== __vit_map_strstr_get(i8* map, i8* key) -> i8* ======
+        // ====== __vit_map_strstr_get_{cap}(i8* map, i8* key) -> i8* ======
         {
             let null_str: inkwell::values::BasicValueEnum = i8_ptr.const_null().into();
-            let f = self.module.add_function("__vit_map_strstr_get",
+            let fn_name = format!("__vit_map_strstr_get_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false), None);
             let entry = self.context.append_basic_block(f, "entry");
             let lp    = self.context.append_basic_block(f, "lp");
@@ -1304,7 +1339,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(65536, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(strstr_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             let u   = self.builder.build_load(i32_type, up, "u").unwrap().into_int_value();
@@ -1327,7 +1362,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f8  = i64_type.const_int(8, false);
-            let vo  = self.builder.build_int_add(i64_type.const_int(32768, false),
+            let vo  = self.builder.build_int_add(i64_type.const_int(strstr_val_off, false),
                         self.builder.build_int_mul(i64, f8, "xv").unwrap(), "vo").unwrap();
             let vp  = unsafe { self.builder.build_gep(i8_type, map, &[vo], "vp") }.unwrap();
             let v   = self.builder.build_load(i8_ptr, vp, "v").unwrap();
@@ -1344,9 +1379,10 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_return(Some(&null_str)).unwrap();
         }
 
-        // ====== __vit_map_strstr_has(i8* map, i8* key) -> i32 ======
+        // ====== __vit_map_strstr_has_{cap}(i8* map, i8* key) -> i32 ======
         {
-            let f = self.module.add_function("__vit_map_strstr_has",
+            let fn_name = format!("__vit_map_strstr_has_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false), None);
             let entry = self.context.append_basic_block(f, "entry");
             let lp    = self.context.append_basic_block(f, "lp");
@@ -1368,7 +1404,7 @@ impl<'ctx> Codegen<'ctx> {
             let i   = self.builder.build_load(i32_type, pp, "i").unwrap().into_int_value();
             let i64 = self.builder.build_int_s_extend(i, i64_type, "i64").unwrap();
             let f4  = i64_type.const_int(4, false);
-            let uo  = self.builder.build_int_add(i64_type.const_int(65536, false),
+            let uo  = self.builder.build_int_add(i64_type.const_int(strstr_used_off, false),
                         self.builder.build_int_mul(i64, f4, "x").unwrap(), "uo").unwrap();
             let up  = unsafe { self.builder.build_gep(i8_type, map, &[uo], "up") }.unwrap();
             let u   = self.builder.build_load(i32_type, up, "u").unwrap().into_int_value();
@@ -1402,12 +1438,13 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         // ====================================================================
-        // map[i32, i64]: key_off=i*4, val_off=16384+i*8, used_off=49152+i*4
+        // map[i32, i64]
         // ====================================================================
 
-        // --- __vit_map_i32i64_set ---
+        // --- __vit_map_i32i64_set_{cap} ---
         {
-            let f = self.module.add_function("__vit_map_i32i64_set",
+            let fn_name = format!("__vit_map_i32i64_set_{}", cap);
+            let f = self.module.add_function(&fn_name,
                 void_type.fn_type(&[i8_ptr.into(), i32_type.into(), i64_type.into()], false), None);
             let entry = self.context.append_basic_block(f, "entry");
             let lp  = self.context.append_basic_block(f, "lp");

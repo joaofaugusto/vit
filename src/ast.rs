@@ -10,7 +10,7 @@ pub enum Type {
     Str,
     Void,
     Array { element: Box<Type>, size: usize },
-    Map { key: Box<Type>, value: Box<Type> },
+    Map { key: Box<Type>, value: Box<Type>, cap: Option<usize> },
     Struct(String),
 }
 
@@ -25,7 +25,10 @@ impl fmt::Display for Type {
             Type::Str => write!(f, "str"),
             Type::Void => write!(f, "void"),
             Type::Array { element, size } => write!(f, "[{}; {}]", element, size),
-            Type::Map { key, value } => write!(f, "map[{}, {}]", key, value),
+            Type::Map { key, value, cap } => match cap {
+                Some(n) => write!(f, "map[{}, {}; {}]", key, value, n),
+                None    => write!(f, "map[{}, {}]", key, value),
+            },
             Type::Struct(name) => write!(f, "{}", name),
         }
     }
